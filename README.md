@@ -1,2 +1,0 @@
-# DVWA
-DVWA walkthrough/takenotes
