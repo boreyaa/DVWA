@@ -1,367 +1,179 @@
-# Cryptography密码学
+# Cryptography
 
-DVWA的Cryptography模块主要演示常见密码学实现错误，包括：
-1. 把编码或简单混淆当成加密
-2. 使用 ECB 这种不安全分组模式
-3. CBC 模式下的 Padding Oracle 攻击
-4. 正确使用认证加密算法作为安全实现参考
+这个模块演示的是"密码学用错"，不是算法被破。四档对应四种典型错误，从"把编码当加密"一路到正确的认证加密。
 
-# Low 等级实操：XOR + Base64 不是安全加密
-## 漏洞原理
->Low 等级展示的是一个非常典型的错误：开发者使用 XOR + Base64 来“保护”数据，但这本质上更接近编码或简单混淆，不是真正的安全加密 
-根据网络资料，low等级的token结构大致是：
->Base64-encoded XOR
-使用的秘钥类似：wachtwoord
->这个等级的核心问题是:XOR 加密在密钥重复、密钥可猜、明文可知的情况下非常容易被还原
+先说明一句：这个模块我主要以读源码和算法推演为主，本机没有把四档全部跑通。下面的状态标注里写清了哪些是我实测的、哪些是看资料推出来的。写这份笔记的目的不是凑一个"通关记录"，是把四种错误分清楚，面试被问到能答上来。
 
-## 实操目标：
-一般目标是：
-1. 获取页面中给出的密文 token
-2. Base64 解码
-3. 使用 XOR 还原明文
-4. 理解为什么这不是安全加密
+四档对应的算法：
 
-## 手工分析流程
-1. 假设页面给了你一个token,例如:Gx0f...
-2. 第一步，Base64解码
-3. 可以使用CyberChef:From Base64
-4. 然后尝试XOR
-5. 如果你知道密钥是：wachtwoord
-6. 则可继续使用:XOR with key: wachtwoord
-7. 最终会得到类似JSON或可读字符串，例如：
->XOR with key: wachtwoord
-具体内容取决于DVWA版本和页面给出的challenge
+| 等级 | 算法 | 错误类型 |
+|---|---|---|
+| Low | XOR + Base64 | 把编码/混淆当加密 |
+| Medium | AES-128-ECB | 分组模式选错，无 IV |
+| High | AES-128-CBC | Padding Oracle，错误信息泄露 |
+| Impossible | AES-256-GCM | 认证加密，正确做法 |
 
-## Python实操脚本
-```html
+## Low：XOR + Base64
+
+页面给一个 token，开发者的想法是"我异或一下再 Base64，别人看不懂了"。
+
+问题有三个：密钥短、密钥重复使用、Base64 只是编码不提供任何安全性。
+
+还原步骤：
+
+1. Base64 解码，拿到字节串
+2. 用密钥循环异或还原
+
+```python
 import base64
 
-token = "把页面中的token放这里"
-key = b"wachtwoord"
+token = "页面里给出的 token"
+key = b"wachtwoord"          # 资料里给出的固定密钥，我没在本机核对过
 
 cipher = base64.b64decode(token)
-
-plain = bytes([
-    cipher[i] ^ key[i % len(key)]
-    for i in range(len(cipher))
-])
-
+plain = bytes([cipher[i] ^ key[i % len(key)] for i in range(len(cipher))])
 print(plain.decode(errors="ignore"))
 ```
 
-## 如果不知道密钥怎么办
-1. 如果你知道部分明文，可以利用 XOR 的性质：
+CyberChef 也能做：`From Base64` → `XOR` → 填 key。
 
-```html
-ciphertext = plaintext XOR key
-key = ciphertext XOR plaintext
+密钥不知道怎么办？异或有个性质：`密文 = 明文 XOR 密钥`，所以 `密钥 = 密文 XOR 明文`。只要猜到明文里有一段固定内容（比如 `"user"`、`"role"`），就能反推密钥片段。这就是已知明文攻击。
+
+这一级的结论一句话：**异或不是不能用，但密钥短、重复用、可预测的时候等于没加密**。自己设计加密算法基本都是这个结局。
+
+状态：算法和脚本逻辑我自己推过，token 的实际还原没有在本机完成（页面 challenge 格式与资料里的版本不完全一致）。
+
+## Medium：AES-ECB 分组替换
+
+ECB 的特点是每个 16 字节分组独立加密，同样的明文块永远得到同样的密文块，也没有 IV。
+
 ```
-例如你猜测明文中包含：
-
-```html
-"user"
-"admin"
-"role"
+明文块1 → 密文块1
+明文块2 → 密文块2
+明文块3 → 密文块3
 ```
-可以用已知明文攻击恢复密钥片段。
 
-**这就是 Low 等级真正想让你理解的点：XOR 不是不能用，但如果密钥短、重复使用、可预测，就会非常危险。**
+后果是密文可以被随意搬运。攻击者拿到自己的 token 和管理员的 token，就能把管理员 token 里"权限"那一块剪切下来，拼进自己的 token。
 
-# Low等级知识点总结
-| 知识点 | 说明 |
-|---|---|
-| 编码 vs 加密 | Base64 只是编码，不提供安全性 |
-| XOR 原理 | 明文、密文、密钥三者任意知道两个可以推出第三个 |
-| 重复密钥风险 | 短密钥循环使用容易被恢复 |
-| 已知明文攻击 | 猜测部分明文可以推导密钥 |
-| 密码学误用 | 自己设计“加密算法”通常非常危险 |
+先按 16 字节切开看结构：
 
-# Medium 等级实操：AES-ECB 分组替换攻击
-## 漏洞原理
-Medium等级使用的是：
->AES-128-ECB
-公开资料中提到，Medium 等级使用 AES-128-ECB，每个分组独立加密，不使用 IV
-ECB最大的问题是：
-```html
-明文块1 -> 密文块1
-明文块2 -> 密文块2
-明文块3 -> 密文块3
-```
-每个块彼此独立，所以攻击者可以进行
->复制、剪切、重排密文块
-这就是所谓的 cut-and-paste attack，即分组替换攻击
-
-## 实操目标
-medium等级通常会给你多个用户token,例如：
-```html
-user token
-admin token
-guest token
-```
-你的目标可能是：
-1. 观察不同 token 的密文块
-2. 将 token 按 16 字节分组
-3. 找到包含目标权限字段的密文块
-4. 拼接一个新的 token
-5. 使用伪造 token 访问系统
-## 分组分析方法
-AES的分组大小是：
->16 bytes = 128 bits
-如果 token 是 Base64 编码的，需要先 Base64 解码。
-```html
-python示例
+```python
 import base64
 
-token = "页面中的token"
+token = "页面里的 token"
 raw = base64.b64decode(token)
 
 for i in range(0, len(raw), 16):
-    block = raw[i:i+16]
-    print(i // 16, block.hex())
+    print(i // 16, raw[i:i+16].hex())
 ```
-输出可能类似：
-```html
+
+输出类似：
+
+```
 0 8f2a1c...
 1 7b9d3e...
 2 cc45ab...
-3 19ef72...
 ```
-### 对比多个token
-假设有三个token
-```html
-token_user
-token_admin
-token_guest
-```
-可以这样分组打印
+
+把多个 token 并排切，找哪一块在不同用户之间不同——那一块大概率存的就是身份或权限。然后拼接：
+
 ```python
 import base64
 
-tokens = {
-    "user": "用户token",
-    "admin": "管理员token",
-    "guest": "访客token"
-}
+user_raw  = base64.b64decode("普通用户的 token")
+admin_raw = base64.b64decode("管理员的 token")
 
-for name, token in tokens.items():
-    raw = base64.b64decode(token)
-    print(f"\n{name}:")
-    for i in range(0, len(raw), 16):
-        print(i // 16, raw[i:i+16].hex())
+u = [user_raw[i:i+16]  for i in range(0, len(user_raw), 16)]
+a = [admin_raw[i:i+16] for i in range(0, len(admin_raw), 16)]
+
+forged = u.copy()
+forged[1] = a[1]                 # 把第 2 块换成管理员的
+
+print(base64.b64encode(b"".join(forged)).decode())
 ```
-如果某个块对应的是：
->"role":"admin"
-或者：
->"is_admin":true
 
-## 拼接伪造token
-```python
-import base64
+生成的 token 提交回去，权限就变了。
 
-user_raw = base64.b64decode("普通用户token")
-admin_raw = base64.b64decode("管理员token")
+经典图示是 ECB 加密企鹅图片，轮廓还在，就是因为相同像素块产生相同密文块。用在 token 上，问题就是可以拼接伪造。
 
-user_blocks = [
-    user_raw[i:i+16]
-    for i in range(0, len(user_raw), 16)
-]
+状态：分组切分和拼接脚本我写过并验证过逻辑，实际提交伪造 token 这一步受页面 token 格式限制，没有完整跑通。
 
-admin_blocks = [
-    admin_raw[i:i+16]
-    for i in range(0, len(admin_raw), 16)
-]
+## High：CBC 与 Padding Oracle
 
-# 示例：把 admin 的第 2 个块替换到 user 的第 2 个块
-forged_blocks = user_blocks.copy()
-forged_blocks[1] = admin_blocks[1]
+CBC 引了 IV，每个明文块和前一块密文异或，比 ECB 安全。但它有个前提：解密失败时不能告诉外面"为什么失败"。
 
-forged_raw = b"".join(forged_blocks)
-forged_token = base64.b64encode(forged_raw).decode()
+CBC 解密：
 
-print(forged_token)
 ```
-然后把生成的forget token提交到DVWA页面
-
-## 为什么ECB不安全
-ECB模块的问题是：
->相同明文块 -> 相同密文块
-它不会隐藏数据模式。
-
-经典例子是“ECB 加密企鹅图”：
-
-1. 明文图像有明显轮廓
-2. ECB 加密后轮廓仍可被看出
-3. 因为相同像素块产生相同密文块
-在 DVWA 的 Medium 等级中，这个问题体现在用户 token 上：攻击者可以通过分组替换构造新的身份或权限。
-
-## Medium等级知识点总结
-| 知识点 | 说明 |
-|---|---|
-| AES 分组加密 | AES 固定 16 字节分组 |
-| ECB 模式缺陷 | 相同明文块产生相同密文块 |
-| 无 IV 风险 | ECB 不使用 IV，无法隐藏重复结构 |
-| 分组替换攻击 | 攻击者可以重排密文块 |
-| token 安全设计 | 加密不等于完整性保护 |
-| 认证加密必要性 | 需要防止密文被篡改 |
-
-# High 等级实操：CBC Padding Oracle 攻击
-## 漏洞原理
-该等级使用的是：
->AES-128-CBC
-公开资料中提到，High 等级展示的是针对 AES-CBC 的 Padding Oracle 攻击。
-
-CBC 模式比 ECB 安全，因为它引入了 IV，并且每个密文块依赖前一个密文块。但如果服务端在解密失败时泄露“padding 是否正确”的信息，就可能产生 Padding Oracle 漏洞。
-## CBC解密结构
-CBC解密过程可以表示为：
-```html
 P1 = Dec(C1) XOR IV
 P2 = Dec(C2) XOR C1
 P3 = Dec(C3) XOR C2
 ```
-其中
-```html
-P 是明文块
-C 是密文块
-IV 是初始化向量
-Dec 是 AES 解密函数
+
+关键性质：改前一块密文，就能控制当前块的明文，因为两者是异或关系。
+
+### Padding 是什么
+
+AES 分组固定 16 字节，明文不满要补。PKCS#7 规则是补几个字节就填几：
+
 ```
-攻击者虽然不知道密钥，但可以修改前一个密文块，从而影响当前明文块。
-
-## Padding 是什么？
-1. AES 块大小是 16 字节。
-
-2.  如果明文不足 16 字节，需要填充。
-
-3. 常见填充方式是 PKCS#7：
-
-4. 如果缺 1 字节，填充：
-
->01
-5. 如果缺 2 字节，填充：
-
->02 02
-6. 如果缺 3 字节，填充：
-
-
->03 03 03
-7. 如果整个块都需要填充，则填充：
-
->10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10
-Padding Oracle 攻击就是利用服务端对 padding 是否正确的不同响应，逐字节恢复明文。
-
-## 实操目标
-1. 页面给出 token 和 IV
-2. 你提交 token
-3. 服务端会尝试解密
-4. 如果 padding 错误，返回一种响应
-5. 如果 padding 正确，返回另一种响应
-6. 利用响应差异还原明文或伪造 token
-
-## 手工理解攻击过程
-假设有两个块
-```html
-C0 = IV
-C1 = 密文块
+缺 1 字节 → 01
+缺 2 字节 → 02 02
+缺 3 字节 → 03 03 03
+整块都缺 → 10 10 ... （16 个 0x10）
 ```
-服务端解密
->P1 = Dec(C1) XOR C0
-攻击者不能控制 Dec(C1)，但可以控制 C0。
 
-如果我们修改 C0 的最后一个字节，使得 P1 的最后一个字节变成：
+### 攻击怎么走
 
->01
+服务端解密后要检查 padding 合不合法。如果它对这个检查结果给出不同响应（比如报错页 vs 正常页），就泄露了一位信息。
 
-服务端会认为padding正确，攻击公式
-```html
-中间值 I = Dec(C1)
-P1 = I XOR C0
+1. 构造 `C0'`，暴力改最后一个字节，从 0x00 试到 0xff
+2. 某一个值让 padding 变成合法的 `01`，服务端返回"正常"
+3. 这时 `I[15] = C0'[15] XOR 0x01`，中间值拿到了
+4. 原始明文 `P1[15] = I[15] XOR C0[15]`
+5. 把目标改成 `02 02`，继续攻倒数第二位
+
+一个块 16 字节，最坏 16 × 256 次请求就能拿下一个块。
+
+工具层面有 padbuster：
+
+```bash
+padbuster <URL> <ciphertext> 16 -encoding 0
 ```
-如果想让最后一个明文字节变成01：
->C0'[15] = I[15] XOR 0x01
-攻击者不知道 I[15]，但可以暴力尝试 0x00 到 0xff。
 
-当服务端返回 padding 正确时，就能推出：
->I[15] = C0'[15] XOR 0x01
-再推出原始明文字节
->P1[15] = I[15] XOR C0[15]
-然后继续攻击倒数第二个字节，使 padding 变成：
->02 02
-以此类推，最终恢复整个明文块。
+DVWA 这一级的 token 还套了 Base64 和 IV，实际用工具要先把参数对齐：抓包找到 token 和 IV、判断编码、确认 padding 错和 padding 对时的响应差异。
 
-## 使用工具实操思路
-如果你只是学习，不想手写完整 Padding Oracle 脚本，可以使用工具，例如
->padbuster
-一般的使用逻辑是：
->padbuster <URL> <ciphertext> <block_size> -encoding 0
-但 DVWA 的 High 等级 token 通常还涉及 IV、Base64、JSON 等格式，所以实际使用时你需要：
-```html
-抓包
-找到 token 参数
-找到 IV 参数
-判断 token 是否 Base64 编码
-判断 padding 错误和 padding 正确时页面响应差异
-配置工具或编写脚本自动尝试
-```
-# high等级知识点总结
-| 知识点 | 说明 |
-|---|---|
-| CBC 模式 | 每个明文块与前一个密文块或 IV 异或 |
-| IV 作用 | 防止相同明文产生相同密文 |
-| PKCS#7 Padding | 分组加密需要填充 |
-| Padding Oracle | 服务端泄露 padding 是否正确 |
-| 密文可塑性 | CBC 密文被修改后会影响解密明文 |
-| 完整性保护 | 仅加密不能防止篡改 |
-| 错误信息处理 | 不应暴露 padding 错误细节 |
-| 认证加密 | 应使用 GCM、ChaCha20-Poly1305 等 AEAD 算法 |
+状态：这一级我只做了原理推演和工具调研，没有真的拿 padbuster 打完整个 token。原因同上，页面 token 的封装格式和工具默认输入对不上，硬试的时间成本高于收益。
 
-# Impossible 等级实操：安全实现参考
-## 实现思路
-Impossible 等级不是让你攻击成功，而是展示安全实现。
+## Impossible：AES-256-GCM
 
-公开资料显示，Impossible 等级使用的是：
->AES-256-GCM
-其特点包括
-1. 使用认证加密
-2. 每次加密生成随机 IV
-3. 使用 authentication tag 验证数据完整性
-4. 不容易受到 Padding Oracle 攻击，因为 GCM 不需要传统 padding
-## 为什么 AES-GCM 更安全？
-AES-GCM 属于 AEAD：
->Authenticated Encryption with Associated Data
-也就是:
->加密 + 完整性校验
-它不仅保护数据机密性，还保护数据不被篡改。
+GCM 属于认证加密（AEAD）：加密的同时产生一个认证 tag，解密时先验 tag，不合法直接拒。
 
-如果攻击者修改了密文、IV 或 tag，解密时认证会失败，服务端不会返回被篡改后的明文。
+三个特点：
 
-## 实操观察
-你可以尝试：
-1. 获取 Impossible 等级页面中的 token
-2. 修改 token 任意一个字符
-3. 提交
-4. 观察结果
-通常结果应该是：
-```html
-认证失败
-无法解密
-token 无效
-```
-而不会像 High 等级那样暴露 padding 是否正确。
+1. 每次加密用随机 IV
+2. 密文被改一个字节，tag 校验就失败，不会返回被篡改的明文
+3. 不需要传统 padding，Padding Oracle 这条路天然不存在
 
-# Impossible 等级知识点总结
-| 知识点 | 说明 |
-|---|---|
-| AES-GCM | 认证加密模式 |
-| 随机 IV | 每次加密使用唯一 IV |
-| Authentication Tag | 验证密文完整性 |
-| 防篡改 | 修改密文会导致认证失败 |
-| 无 Padding Oracle | GCM 不使用传统 CBC padding |
-| 安全设计 | 机密性和完整性都要考虑 |
+可以自己验一下：拿页面 token 改任意一个字符提交，结果是"认证失败/无法解密"，而不是像 High 那样区分 padding 对错。这个观察我做过，结论和预期一致。
 
-# 四个等级对比总结
-| 等级 | 算法 / 方式 | 主要问题 | 攻击方式 |
-|---|---|---|---|
-| Low | XOR + Base64 | 把编码/混淆当加密 | Base64 解码、XOR 还原 |
-| Medium | AES-128-ECB | ECB 分组独立、无 IV | 分组替换、剪切粘贴攻击 |
-| High | AES-128-CBC | Padding Oracle | 利用 padding 错误响应恢复明文 |
-| Impossible | AES-256-GCM | 安全实现参考 | 正常情况下无法篡改成功 |
+## 我卡住的地方
+
+- Low 一开始以为 Base64 解出来就能看到明文，结果是一堆乱码。忘了还有异或这一层。
+- ECB 切块时第一块切错位置，因为 token 前面有前缀，不是从第一个字节开始就是数据。要先试几个偏移。
+- Padding Oracle 那块看了两遍才想通"为什么改前一块能控制当前块"。关键在于 `P = Dec(C) XOR 前一块`，`Dec(C)` 是固定的，前一块变，P 就跟着变。
+
+## 怎么修
+
+1. 不要自己设计加密。用标准库的标准模式。
+2. 分组模式别用 ECB。要加密多条数据，用 CBC 加随机 IV，或者直接上 GCM。
+3. 加密必须配完整性校验。要么用 AEAD（GCM、ChaCha20-Poly1305），要么加密后再 HMAC。只加密不校验，等于允许别人改密文。
+4. 解密失败统一报错。"填充错误"和"校验失败"不能区分，否则就是 Oracle。
+5. IV 每次随机，且不能和密钥一起暴露。CBC 的 IV 可以公开，但必须随机。
+6. 密钥管理比算法重要。密钥写在代码里、写在配置文件里、和密文放一起，前面做得再对也白搭。
+
+## 参考来源
+
+- 各级算法与模式（XOR+Base64、AES-128-ECB、AES-128-CBC、AES-256-GCM）参考 DVWA 官方文档与项目源码说明。
+- Padding Oracle 部分参考了 PKCS#7 填充标准和公开的 Oracle 攻击说明。
+- 我实际验证的是：ECB 分组切分与拼接的脚本逻辑、GCM 篡改后认证失败的观察。其余为资料研读，未在本机完整复现。
