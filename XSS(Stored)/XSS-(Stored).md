@@ -1,153 +1,136 @@
-# XSS(Stored)的原理
->服务端会把这些内容保存到数据库中，然后在页面中展示出来,如果服务端没有正确过滤或编码用户输入，攻击者就可以把 JavaScript 代码写入留言内容中。之后，任何访问这个页面的用户都会执行这段恶意脚本。
+# XSS(Stored)
 
-### 基本流程
-1. 攻击者提交恶意脚本
-2. 服务端保存到数据库
-3. 其他用户访问页面
-4. 浏览器渲染页面
-5. 恶意 JavaScript 被执行
+留言板。填名字和内容，提交后存进数据库，每次打开页面都从库里读出来显示。
 
-### 你需要知道
->XSS 的本质不是“把脚本提交进去”，而是“浏览器把攻击者输入当成代码执行”。
+区别就在这个"存"字上。payload 进了库，谁访问谁中招，不用点链接，也不用诱导。所以存储型是三种 XSS 里危害最大的。
 
-### 输入过滤和输出编码的区别
-#### 输入过滤
-过滤script
-```javascript
-str_replace('<script>', '', $message);
+## 数据流
+
 ```
-#### 输出编码 
-```javascript
-htmlspecialchars($message, ENT_QUOTES, 'UTF-8');
+提交内容 → 写入数据库 → 其他用户打开页面 → 从库里读出 → 拼进 HTML → 浏览器执行
 ```
-#### 这会把危险字符转义
-| 原字符 | 编码后 |
-|---|---|
-| `<` | `&lt;` |
-| `>` | `&gt;` |
-| `"` | `&quot;` |
-| `'` | `&#039;` |
-| `&` | `&amp;` |
 
-###  为什么 Stored XSS 危害比 Reflected XSS 更大
->Stored XSS 不需要诱导用户点击恶意链接，只要用户访问被污染的页面就会中招,例如:
+要注意存储点和触发点不一定在同一个页面。真实环境里更常见的形态是：用户在个人资料里填昵称，昵称存库，**管理员在后台的用户列表页看到它**，XSS 在管理员浏览器里炸。目标不是填内容的用户，是看他内容的人。
 
-1. 窃取 Cookie
-2. 劫持用户会话
-3. 篡改页面内容
-4. 伪造用户操作
-5. 获取用户输入
-6. 钓鱼
-7. 内网攻击跳板
-8. 管理员后台沦陷
-9. 蠕虫式传播
+## Low
 
-### Stored XSS的触发点和存储点
+不过滤，直接存，直接输出。
 
-#### 存储点
->也就是恶意代码被保存的位置。
-#### 触发点
->也就是恶意代码被展示并执行的位置。
+留言内容填：
 
-## 在真实环境下，一个输入点和输出点可能并不在同一个页面,比如以下流程
-1. 用户修改昵称
-2. 昵称存入数据库
-3. 管理员后台查看用户列表
-4. 管理员浏览器触发 XSS
-
-# Low 等级基本不做过滤或编码，用户输入会被原样保存并原样输出。
 ```html
-在Message中输入<script>alert('XSS')</script>,name可以随便填,出现下图中的内容即说明Stored XSS成功
+<script>alert('XSS')</script>
 ```
->效果图:https://github.com/boreyaa/DVWA/blob/main/XSS(Stored)/xss-low.png
 
-### 你需要理解的是
-1. 用户输入不能直接信任
-2. 数据库存储了恶意脚本
-3. 每次刷新页面都会再次触发
-4. 其他用户访问该页面也会执行脚本
-5. Stored XSS 具有持久性
+提交，页面刷新就弹窗。再刷新一次还弹，因为脚本在库里。
 
-## cookie获取测试
+![Low 弹窗](xss-low.png)
+
+### 读 Cookie
+
 ```html
-在message里面输<script>alert(document.cookie)</script>,name任意填，就可以获取到cookie,内容如下图
+<script>alert(document.cookie)</script>
 ```
->效果图:https://github.com/boreyaa/DVWA/blob/main/XSS(Stored)/xss-cookie.png
 
-## 页面篡改测试
-> <script>document.body.innerHTML='页面已被修改'</script>
->效果图：https://github.com/boreyaa/DVWA/blob/main/XSS(Stored)/xss-page-test.png
+弹出来的就是当前会话的 `PHPSESSID` 和 `security`。真实环境里这一步是把 Cookie 发到攻击者服务器，然后拿这个 Cookie 顶替受害者登录。
 
+![读 Cookie](xss-cookie.png)
 
-# Medium 等级通常会做一些简单过滤
->比如过滤script标签
-```javascript
-str_replace('<script>', '', $message);
-```
+### 改页面
+
 ```html
-当使用Low难度里面的<script>alert('XSS')</script>,会发现没有弹窗，说明被过滤了
+<script>document.body.innerHTML='页面已被修改'</script>
 ```
-### 可以使用以下方法绕过
-| 绕过方式 | 绕过代码 | 方式 |
-|---|---|---|
-| 使用图片事件 | `<img src=x onerror=alert('XSS')>` | 放在name字段,放在message会被处理掉 |
-| 使用SVD | `<svg onload=alert(XSS)>` |放在name字段,|
-| 使用大小写 | `<ScRiPt>alert('XSS')</ScRiPt>` |放在Name字段|
-| 嵌套构造绕过 | `<scr<script>ipt>alert(1)</script>` | 方式：源码删除中间的script标签后，就变成正常的了 |
 
-***值得注意的是***
->由于源码设置的Name的Maxlength为10，所以想输入绕过代码的时候会被"截断"，这个时候我推荐使用burp抓包工具将name那一栏的内容直接修改为想要的代码，这样就可以绕过原本的源码maxlength的限制，直接起到真正的攻击体验作用，当然也可以有其他修改方法,curl构造请求，或者是在console里面直接输入document.querySelector('[name=txtName]').removeAttribute('maxlength'),不建议直接动源码内容，因为当前靶场为靶机测试环境，直接修改源码起不到实操训练的作用。
->以下为嵌套构造绕过在Burp的实操图https://github.com/boreyaa/DVWA/blob/main/XSS(Stored)/xss-burp.png
+![页面被篡改](xss-page-test.png)
 
-绕过成功效果图https://github.com/boreyaa/DVWA/blob/main/XSS(Stored)/xss-medium.png
+这条说明危害不止偷 Cookie：钓鱼表单、伪造公告、诱导点击，都是在受害者看起来"正常"的页面上完成的。
 
-# High 等级通常会使用更强的过滤，例如正则过滤script标签，可能大小写不敏感。
->在high难度里面你需要了解到：
-1. 正则过滤比简单替换强，但仍然不是最佳防御
-2. 只拦截危险标签不能覆盖全部 XSS 场景
-3. XSS 防御不能依赖单一黑名单
-4. 正确的输出编码比过滤更关键
-5. 不同输出上下文需要不同编码策略
+## Medium
 
+内容字段做了 `str_replace('<script>', '', $message)`，`<script>` 会被删掉。名字字段也一样处理。
 
-过滤代码
+直接 `<script>alert('XSS')</script>` 不弹了。
+
+绕法还是那几个，但这里有个坑：**绕过的 payload 要放进 name 字段，不能放 message**。放 message 会被处理掉，而 name 字段的处理路径不一样。
+
+还有一个更实际的障碍：name 输入框有 `maxlength="10"`，`<img src=x onerror=alert(1)>` 有 28 个字符，页面上根本输不进去。
+
+### 绕 maxlength
+
+三种做法，我用的第一种：
+
+1. Burp 拦下提交请求，直接把 `txtName` 的值改成完整 payload。前端限制只在浏览器里生效，请求体里没有长度约束。
+2. `curl` 构造同样的 POST 请求直接发。
+3. 控制台里 `document.querySelector('[name=txtName]').removeAttribute('maxlength')`，然后正常输入。
+
+![Burp 改 name 字段](xss-burp.png)
+
+这里有个取舍：第三种最快，但它是在改靶场页面本身，等于绕过了练习对象。前两种才是真实场景里的做法，因为攻击者根本不用你的页面，他自己构造请求。
+
+改完之后的 payload：
+
 ```html
+<img src=x onerror=alert('XSS')>
+<svg onload=alert('XSS')>
+<ScRiPt>alert('XSS')</ScRiPt>
+```
+
+![Medium 绕过](xss-medium.png)
+
+`<ScRiPt>` 能过是因为 `str_replace` 是区分大小写的，`<script>` 不等于 `<ScRiPt>`。
+
+## High
+
+换成大小写不敏感的正则：
+
+```php
 preg_replace('/<(.*)s(.*)c(.*)r(.*)i(.*)p(.*)t/i', '', $message);
 ```
 
->当测试script的时候,通常会被过滤，如果做了大小写不敏感匹配，一般会失败
+`script` 的三种写法全废。但事件属性这条路一直开着：
 
-尝试非scripte标签
 ```html
 <img src=x onerror=alert('XSS')>
-```
-尝试SVG
-```html
 <svg onload=alert('XSS')>
 ```
 
-**如果能够执行，可以说明浏览器中可执行 JavaScript 的 HTML/SVG 上下文很多。**
+和反射型那节完全一样的原因：过滤的是"标签名"，而执行 JS 不靠标签名。
 
-# Impossible 等级通常采用了较完善的防御方式，例如：
-1. 使用 token 防 CSRF
-2. 对输入做严格处理
-3. 对输出做 HTML 实体编码
-4. 使用 htmlspecialchars
-5. 对数据库操作使用预处理语句
+## Impossible 为什么打不进去
 
-### 你需要理解到
-1. 正确编码可以让恶意输入变成普通文本
-2. 不应该依赖黑名单过滤
-3. 输出位置决定编码方式
-4. 防御 XSS 的核心是“上下文感知的输出编码”
-5. 安全开发应结合输入校验、输出编码、CSP、HttpOnly、SameSite 等机制
+两层：
 
+1. 存的时候用 `htmlspecialchars($message, ENT_QUOTES, 'UTF-8')` 编码
+2. 输出的时候再编码一次
 
-# 不同安全等级对比
-| 安全等级 | 防护方式 | 是否容易利用 | 典型绕过思路 | 学习重点 |
-|---|---|---|---|---|
-| Low | 基本无过滤 | 非常容易 | 直接 `<script>` | 理解 Stored XSS 基本原理 |
-| Medium | 简单字符串过滤 | 容易 | 大小写、事件属性、非 script 标签 | 理解黑名单过滤缺陷 |
-| High | 更强正则过滤 | 中等 | 非 script 标签、事件属性、上下文绕过 | 理解单点过滤仍不可靠 |
-| Impossible | 输出编码和安全处理 | 很难 | 正常情况下无法利用 | 理解正确防御方式 |
+存进去的已经是实体，`&lt;script&gt;`，读出来显示也是实体，浏览器当文字看。
+
+另外还加了 token 防 CSRF、数据库用预处理语句。这几条和 XSS 没直接关系，但一起构成了这个模块的整体防护。
+
+## 输入过滤和输出编码不是一回事
+
+这个区分很多人搞不清，写在这儿：
+
+| 做法 | 代码 | 效果 |
+|---|---|---|
+| 输入过滤 | `str_replace('<script>', '', $m)` | 改的是存进库的内容，黑名单可绕 |
+| 输出编码 | `htmlspecialchars($m, ENT_QUOTES, 'UTF-8')` | 改的是显示形式，标签变文字，绕不了 |
+
+关键差别：输入过滤要在**入库前**做，一旦漏了，脏数据永远在库里；输出编码在**显示前**做，每个输出点各自处理，漏一个点才漏一个点。
+
+正确做法是输出编码，输入侧只做长度和类型校验，别指望它防 XSS。
+
+## 我卡住的地方
+
+- Medium 一开始把 payload 放 message，怎么都不弹。后来发现 name 字段才是没被处理干净的那个。
+- `maxlength` 卡了很久。试过在输入框里粘贴，粘贴也被截断。最后用 Burp 改请求体，一次就过。这件事让我记住了：**所有前端限制都只是体验，不是安全边界**。
+- `<ScRiPt>` 大小写绕过的原理是 `str_replace` 区分大小写，不是浏览器不区分。浏览器对标签名是不区分大小写的，所以它会正常解析。
+
+## 怎么修
+
+1. 输出编码，`htmlspecialchars($s, ENT_QUOTES, 'UTF-8')`，每个输出点都要做。
+2. 富文本用白名单库，不要自己写正则。
+3. Cookie 加 `HttpOnly`，脚本读不到 session。
+4. CSP 限制脚本来源。
+5. 后台管理页面尤其注意。存储型的触发点经常在后台，管理员一登录就中招，等于直接拿下最高权限。
