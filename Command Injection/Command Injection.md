@@ -1,207 +1,164 @@
-# Command Injection命令注入
-# 直接下载使用的靶场，使用时可能会出现乱码，可联系我帮忙解决3459786507@qq.com
->DVWA 的 Command Injection 模块模拟的是 操作系统命令注入漏洞
-1. 该模块通常提供一个输入框，让用户输入一个IP地址，然后后台执行类似命令:
-```javascripte
-ping -c 4 用户输入
-```
-2. 如果后端没有正确过滤用户输入，攻击者就可以通过命令连接符拼接额外系统命令，例如：
-```javascript
-127.0.0.1 ;whoami
-```
-3. 最终后台执行的命令可能变成:
-```html
-ping -c 4 127.0.0.1;whoami
-```
-效果图:<img src='whoami.png'>
-**这样不仅执行了ping,还执行了whoami**
+# Command Injection
 
-# 基础命令注入符号
-| 符号 | 作用 |
+页面让你输一个 IP，点提交，服务器去 ping 它。后端大概是这样：
+
+```php
+$target = $_REQUEST['ip'];
+$cmd = shell_exec('ping -c 4 ' . $target);
+```
+
+问题在最后那个点号。用户输的东西原样粘在命令后面，所以只要塞一个命令分隔符，后面写什么都执行。
+
+## 连接符先记一遍
+
+| 符号 | 行为 |
 |---|---|
-| `;` | 顺序执行多个命令 |
-| `&&` | 前一个命令成功后执行后一个命令 |
-| `||` | 前一个命令失败后执行后一个命令 |
-| `&` | 后台执行命令 |
-| `|` | 管道，把前一个命令输出传给后一个命令 |
-| `` `command` `` | 命令替换 |
-| `$(command)` | 命令替换 |
-| `%0a` | URL 编码的换行符，可作为命令分隔 |
-| `%26%26` | URL 编码的 `&&` |
-| `%7c` | URL 编码的 `|` |
+| `;` | 顺序执行，前一个成功失败都继续 |
+| `&&` | 前一个成功才执行后一个 |
+| `\|\|` | 前一个失败才执行后一个 |
+| `\|` | 管道，前一个的输出给后一个当输入 |
+| `&` | 放后台，命令照样执行 |
+| `` `cmd` `` | 命令替换，先把反引号里的跑完再拼回去 |
+| `$(cmd)` | 同上，现代写法 |
 
-# Low等级实操
-代码逻辑
-```html
+URL 里发的时候要编码：`&` 是 `%26`，`|` 是 `%7c`，`;` 是 `%3b`，空格 `%20`，换行 `%0a`。
+
+## Low
+
+```php
 $target = $_REQUEST['ip'];
-
 if (stristr(php_uname('s'), 'Windows NT')) {
     $cmd = shell_exec('ping ' . $target);
 } else {
     $cmd = shell_exec('ping -c 4 ' . $target);
 }
-
-echo "<pre>{$cmd}</pre>";
 ```
-#### 问题在于
-```html
-$target = $_REQUEST['ip'];
+
+一个字的过滤都没有。
+
+先输 `127.0.0.1`，能 ping 通，页面回显 ping 的结果。再输：
+
 ```
-用户输入没有任何过滤，直接拼接到了系统命令中
+127.0.0.1; whoami
+```
 
-1. 正常测试
-输入127.0.0.1，结果会执行，ping -c -4 127.0.0.1,页面会返回Ping的结果
-2. 使用分号注入
-输入127.0.0.1；whoami,如果成功，你会看到ping结果后面出现当前web服务运行用户，例如www-data,后台实际执行ping -c 4 127.0.0.1; whoami
-3. 查看当前路径127.0.0.1; pwd
-效果图<img src=pwd.png>
+回显 ping 结果下面多了一行 `www-data`，说明 `;` 后面的命令执行了。实际跑的是：
 
-# Medium等级实操
-### 代码逻辑
-```html
-$target = $_REQUEST['ip'];
+```
+ping -c 4 127.0.0.1; whoami
+```
 
-$substitutions = array(
-    '&&' => '',
-    ';'  => '',
-);
+![执行 whoami](whoami.png)
 
+换个命令看看当前路径：
+
+```
+127.0.0.1; pwd
+```
+
+![执行 pwd](pwd.png)
+
+到这里性质就定了：任意命令执行，权限跟 Web 服务一致。真实环境里下一步一般是读 `/etc/passwd`、看 `env` 找数据库密码、找能不能提权。
+
+## Medium
+
+加了两个替换：
+
+```php
+$substitutions = array('&&' => '', ';' => '');
 $target = str_replace(array_keys($substitutions), $substitutions, $target);
-
-if (stristr(php_uname('s'), 'Windows NT')) {
-    $cmd = shell_exec('ping ' . $target);
-} else {
-    $cmd = shell_exec('ping -c 4 ' . $target);
-}
 ```
-## 他过滤了&&和；但是没有过滤其他命令连接符
-1. 输入127.0.0.1; whoami，因为;被替换为空，无法成功执行
-2. 使用单个&，输入127.0.0.1 & whoami，过滤了&&，没有过滤&
-3. 使用管道符输入|，127.0.0.1 | whoami，如果成功，可能返回www-data
-4. 使用双管道符||，输入127.0.0.1 || whoami
-5. 使用 使用 URL 编码绕过,可以尝试127.0.0.1%26whoami，其中 %7c 是 | 的 URL 编码。
 
-# High等级实操
->源码分析
-```html
-$target = trim($_REQUEST['ip']);
+只删了 `&&` 和 `;`。剩下的符号一个都没管：
 
+```
+127.0.0.1 & whoami
+127.0.0.1 | whoami
+127.0.0.1 || whoami
+```
+
+`&` 最容易过，因为规则只匹配两个 `&`，单个的不匹配。`|` 也能用，直接拿管道。
+
+还有一个位置要注意：`str_replace` 把 `;` 删掉之后，`127.0.0.1; whoami` 变成 `127.0.0.1 whoami`，这就不是两个命令了，而是给 ping 传了两个参数，会失败。所以这里不是"删了就没事"，是删得不对反而绕不过去，得换符号。
+
+## High
+
+过滤表加长了：
+
+```php
 $substitutions = array(
-    '&'  => '',
-    ';'  => '',
-    '| ' => '',
-    '-'  => '',
-    '$'  => '',
-    '('  => '',
-    ')'  => '',
-    '`'  => '',
-    '||' => '',
+    '&'    => '',
+    ';'    => '',
+    '| '   => '',   ← 注意这里有空格
+    '-'    => '',
+    '$'    => '',
+    '('    => '',
+    ')'    => '',
+    '`'    => '',
+    '||'   => '',
 );
-
-$target = str_replace(array_keys($substitutions), $substitutions, $target);
-
-if (stristr(php_uname('s'), 'Windows NT')) {
-    $cmd = shell_exec('ping ' . $target);
-} else {
-    $cmd = shell_exec('ping -c 4 ' . $target);
-}
 ```
-1. 注意'| ' => ''，他过滤的是管道符+空格，也就是|,这是一个典型的过滤不严谨问题
-2. 使用普通分号失败,输入127.0.0.1; whoami，; 会被过滤掉，通常无法执行。
-3. 使用普通管道加空格可能失败,输入127.0.0.1 | whoami，因为High过滤了|，也就是管道符后根源一个空格
-4. 使用无空格管道绕过，输入127.0.0.1|whoami，因为过滤的是管道符+空格，不是|，所以可能成功执行
 
-# Impossible等级实操
->查看源码
-```html
-$target = $_REQUEST['ip'];
-$target = stripslashes($target);
+看起来该封的都封了。问题出在第三行：`'| '` 匹配的是"管道符加一个空格"，不是管道符本身。
 
+所以 `127.0.0.1 | whoami` 会被拦，因为中间有空格。但：
+
+```
+127.0.0.1|whoami
+```
+
+没有空格，规则匹配不上，直接过。
+
+顺带一个坑：`-` 也在过滤表里，所以 `ping -c 4` 里的 `-c` 会被删掉，页面上 ping 的行为会变得奇怪。这是黑名单式过滤的连带伤害。
+
+## Impossible 为什么打不进去
+
+```php
+$target = stripslashes($_REQUEST['ip']);
 $octet = explode(".", $target);
 
-if (
-    is_numeric($octet[0]) &&
-    is_numeric($octet[1]) &&
-    is_numeric($octet[2]) &&
-    is_numeric($octet[3]) &&
-    sizeof($octet) == 4
-) {
+if (is_numeric($octet[0]) && is_numeric($octet[1]) &&
+    is_numeric($octet[2]) && is_numeric($octet[3]) &&
+    sizeof($octet) == 4) {
+
     $target = escapeshellarg($target);
-
-    if (stristr(php_uname('s'), 'Windows NT')) {
-        $cmd = shell_exec('ping ' . $target);
-    } else {
-        $cmd = shell_exec('ping -c 4 ' . $target);
-    }
-
+    $cmd = shell_exec('ping -c 4 ' . $target);
     echo "<pre>{$cmd}</pre>";
 } else {
     echo '<pre>ERROR: You have entered an invalid IP.</pre>';
 }
 ```
-**它的防御点包括**
-1. 按 . 分割 IP
-2. 检查是否是 4 段
-3. 每段必须是数字
-4. 使用 escapeshellarg() 转义参数
 
-## 命令注入漏洞成因
->用户输入被直接品接近系统命令中执行,例如shell_exec("ping -c 4 " . $_GET['ip']);
-## 命令注入和代码注入的区别
-| 类型 | 说明 |
-|---|---|
-| 命令注入 | 注入操作系统命令，如 `whoami`、`id`、`ls` |
-| 代码注入 | 注入 PHP、Python、JavaScript 等程序语言代码 |
-| SQL 注入 | 注入 SQL 语句操作数据库 |
-| XSS | 注入 JavaScript 到浏览器执行 |
-## URL编码绕过
-| 原字符 | URL 编码 |
-|---|---|
-| `&` | `%26` |
-| `|` | `%7c` |
-| `;` | `%3b` |
-| 空格 | `%20` |
-| 换行 | `%0a` |
-| `$` | `%24` |
-| `(` | `%28` |
-| `)` | `%29` |
-## 输出回显型命令注入
->DVWA是典型的有回显命令注入，即执行结果直接显示在页面上，例如
-```html
-whoami
-id
-pwd
-ls
+三层：
+
+1. 按点切成四段，段数必须正好是四。
+2. 每段必须是纯数字。`127.0.0.1;whoami` 切开以后最后一段是 `1;whoami`，`is_numeric` 直接 false。
+3. `escapeshellarg()` 把整个值包成单个字符串参数，就算里面有符号也只会被当参数的一部分。
+
+第 2 条是关键。它是白名单思路：只接受"长得像 IP 的东西"，其他一律不认，不跟你玩过滤游戏。
+
+## 有回显和无回显
+
+DVWA 是有回显的，命令输出直接显示在页面上，最好办。
+
+真实环境更多是没回显的。这时候靠时间判断：
+
 ```
-## 无回显命令注入思路
->现实中很多命令注入没有直接回显，可以通过延时判断。，输入127.0.0.1; sleep 5，如果页面有明显延迟返回，说明命令可能被执行
-
-# 防御命令注入的正确方式
-### 优先方案：不要调用系统命令
-1. 例如检测 IP 连通性时，不一定非要调用系统 ping。
-
-2. 可以使用语言内置库、网络库或安全封装。
-### 使用白名单校验
-比如只允许IPV4,不让用户输入任意字符串
-```javascript
-filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)
-```
-### 使用参数转义
-php中常见参数:escapeshellarg()和escapeshellcmd()
-```javascript
-$ip = $_GET['ip'];
-
-if (filter_var($ip, FILTER_VALIDATE_IP)) {
-    $safe_ip = escapeshellarg($ip);
-    $cmd = "ping -c 4 " . $safe_ip;
-    echo shell_exec($cmd);
-}
+127.0.0.1; sleep 5
 ```
 
-# DVWA四个等级对比
-| 等级 | 防护方式 | 是否容易绕过 | 学习重点 |
-|---|---|---|---|
-| Low | 无过滤 | 非常容易 | 理解命令注入基础 |
-| Medium | 简单黑名单 | 容易 | 黑名单过滤不完整 |
-| High | 更复杂黑名单 | 仍可绕过 | 过滤规则缺陷 |
-| Impossible | 白名单 + 转义 | 较安全 | 正确防御思路 |
+页面明显停 5 秒才返回，就说明命令执行了。再往后就是往自己机器上打外带请求（DNS 或 HTTP），把结果带出来。这一步超出本靶场范围，没在这里做。
+
+## 我卡住的地方
+
+- High 那档试了 `| whoami`、`; whoami` 全失败，卡了一阵。看到源码里 `'| '` 带空格才反应过来，改成无空格写法一次过。
+- `&&` 在 URL 里必须编码成 `%26%26`，直接写 `&&` 会被服务端解析成两个参数。第一次没编码，回显一直不对。
+- `-` 被过滤导致 ping 本身行为异常，一开始以为是自己命令写错，其实是被过滤表削掉了。
+
+## 怎么修
+
+1. 能不调系统命令就别调。查连通性用语言自带的网络库，比 `ping` 安全得多。
+2. 必须调的话，先严格校验输入。这里是 IP，就用 `filter_var($ip, FILTER_VALIDATE_IP)`，只放合法 IP。
+3. 再用 `escapeshellarg()` 转义。校验加转义是两道，别只做一道。
+4. 命令别用字符串拼接。PHP 的 `proc_open` 支持数组形式传参，参数不会经过 shell 解析。
+5. Web 进程降权，别用 root 跑 PHP-FPM。
