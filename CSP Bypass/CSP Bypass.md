@@ -1,127 +1,119 @@
 # CSP Bypass
 
-CSP 是浏览器侧的一道防线：响应头里声明"只允许从哪些地方加载脚本"，浏览器照做。写对了能挡掉大部分 XSS，写错了就是摆设。
+CSP 是响应头里的一条指令，告诉浏览器"只允许从这些地方加载脚本"。写对了能挡掉大部分 XSS，写错了就是摆设。这个模块练的是看配置哪里歪了，不是破 CSP 本身。
 
-这个模块练的不是"破 CSP"，是"看配置哪里写歪了"。
+## 漏洞在哪
 
-## 先认几个指令
+漏洞不在代码里，在响应头。三档各写错一处：
+
+```text
+Low     script-src 白名单过宽，允许托管任意内容的域名
+Medium  nonce 写死，且与 'unsafe-inline' 同时出现
+High    script-src 'self'，但同源存在可控 callback 的 JSONP
+```
+
+CSP 只判断资源来源，不判断内容。来源合规而内容是攻击者控制的，一样执行。
+
+## 先认指令
 
 | 配置 | 含义 | 常见错误 |
 |---|---|---|
-| `script-src 'self'` | 只准加载同源脚本 | 同源里有 JSONP、上传、可控 JS 就还能绕 |
-| `script-src 'unsafe-inline'` | 允许内联脚本 | 等于放开了 XSS 最常见的形态 |
-| `script-src https://cdn.xxx` | 允许指定外域 | 白名单域能托管任意内容就有风险 |
-| `nonce-xxx` | 只执行带这个 nonce 的脚本 | nonce 固定不变就等于公开 |
+| `script-src 'self'` | 只准同源脚本 | 同源有 JSONP、上传、可控 JS 仍能绕 |
+| `script-src 'unsafe-inline'` | 允许内联脚本 | 等于放开 XSS 最常见形态 |
+| `script-src https://cdn.x` | 允许指定外域 | 该域能托管任意内容就有风险 |
+| `nonce-xxx` | 只执行带此 nonce 的脚本 | nonce 固定即等于公开 |
 | `strict-dynamic` | 信任合法脚本动态插入的脚本 | 现代方案，但依赖浏览器支持 |
 
-看 CSP 的方法：F12 → Network → 刷新 → 点主文档请求 → Response Headers → 找 `Content-Security-Policy`。
+查看方法：F12 → Network → 刷新 → 主文档请求 → Response Headers → `Content-Security-Policy`。
 
-## Low：白名单太宽
+## 等级对照
 
-Low 的 CSP 允许从一批外部域加载脚本。配置本身没错，问题是允许的域太多，其中有些域用户能往上传文件。
+| 等级 | CSP 写法 | 绕过 | 状态 |
+|---|---|---|---|
+| Low | 允许多个外部脚本域 | 从白名单域加载自己的 JS | 未在本机跑通，见参考 |
+| Medium | 固定 nonce + `unsafe-inline` | 抄 nonce 构造内联脚本 | 实测成功 |
+| High | `script-src 'self'` | JSONP callback 注入 | 实测成功 |
+| Impossible | 严格 CSP + callback 硬编码 | 无明显绕法 | 打不进去 |
 
-思路很直接：把恶意 JS 放到一个"白名单里允许、但内容我能控制"的域名上，然后让页面去加载它。
+## Low
 
-```html
-<script src="https://被允许的域名/alert.js"></script>
-```
+| 项 | 内容 |
+|---|---|
+| 问题 | 白名单过宽，允许多个第三方域 |
+| 思路 | 把 JS 放到"白名单允许、内容我可控"的域上 |
+| 落地 | `<script src="https://被允许的域/alert.js"></script>` |
+| 状态 | 只验证到"页面确实允许外部域"，最后一步未在本机完成 |
 
-如果页面只让填 URL，直接提交那个 JS 的地址。
-
-![看 CSP 头](low.png)
+![查看 CSP 头](low.png)
 
 ![提交外部 JS 地址](low1.png)
 
-**这条在本机的复现受环境限制**：DVWA 默认白名单里的域名不归我控制，我没有真的往那些域上传文件。这一级的结论来自官方文档和公开 writeup，我验证到的是"页面确实允许外部域"这一步，最后一步"让页面加载我自己的 JS"没在本机跑通。
+判断标准一条就够：**白名单里只要有一个域能托管任意用户内容（网盘、图床、paste、代码托管），CSP 等于没写**。
 
-判断标准记住一条就够：**白名单里只要有一个域能托管任意用户内容（网盘、图床、paste、代码托管），CSP 就等于没写**。
+## Medium
 
-## Medium：固定 nonce
-
-Medium 用了 nonce，但实现错了：
-
-```
-Content-Security-Policy: script-src 'self' 'unsafe-inline' 'nonce-TmV2ZXIgZ29pbmcgdG8gZ2l2ZSB5b3UgdXA='
-```
-
-两个问题叠在一起：
-
-1. nonce 是写死的，刷新十次都还是这一串。攻击者看一次页面就知道。
-2. 同时带了 `'unsafe-inline'`。有这一项在，内联脚本本来就允许，nonce 完全失去意义。
-
-payload 就是把那个 nonce 抄进 `<script>` 标签：
+| 项 | 内容 |
+|---|---|
+| CSP | `script-src 'self' 'unsafe-inline' 'nonce-TmV2ZXIgZ29pbmcgdG8gZ2l2ZSB5b3UgdXA='` |
+| 问题一 | nonce 写死，刷新多次不变 |
+| 问题二 | 同时带 `unsafe-inline`，内联本来就允许，nonce 失去意义 |
+| 绕过 | 把 nonce 抄进自己的 `<script>` 标签 |
 
 ```html
 <script nonce="TmV2ZXIgZ29pbmcgdG8gZ2l2ZSB5b3UgdXA=">alert("CSP Bypass Medium")</script>
 ```
 
-提交后弹窗。
-
 ![固定 nonce 绕过](medium1.png)
 
-nonce 的正确用法：每个响应生成一个加密安全随机值，绝不重复，也绝不和 `'unsafe-inline'` 同时出现。
+nonce 的正确用法：每个响应生成加密安全随机值，绝不重复，绝不与 `unsafe-inline` 同时出现（同时出现时浏览器会忽略 nonce）。
 
-## High：同源 JSONP
+## High
 
-High 把 CSP 收紧到 `script-src 'self'`，外部域和内联脚本都禁了。表面看没缝。
+| 项 | 内容 |
+|---|---|
+| CSP | `script-src 'self'`，外域与内联全禁 |
+| 缺口 | 页面用 JSONP 取数，`callback` 参数可控 |
+| 绕过 | 抓包把 `callback=solveSum` 改成 `callback=alert(...)//` |
+| 原因 | 脚本来自同源，CSP 只看来源不看内容 |
 
-但页面里有个功能用 JSONP 取数据：
-
-```html
-<script src="source/jsonp.php?callback=solveSum"></script>
-```
-
-JSONP 的原理是把 JS 文件当数据用，服务端返回 `solveSum({"answer":15})`，浏览器当代码执行。那个 `callback` 是函数名，如果它由请求参数控制，就等于请求参数直接变成了代码。
-
-Burp 拦下点击"Solve the sum"时的请求：
-
-```
+```text
 GET /dvwa/vulnerabilities/csp/source/jsonp.php?callback=solveSum HTTP/1.1
+→ callback=alert%28%22CSP%20Bypass%20High%22%29%2F%2F
 ```
 
-把 `callback` 改掉：
-
-```
-callback=alert("CSP Bypass High")//
-```
-
-URL 编码后是 `callback=alert%28%22CSP%20Bypass%20High%22%29%2F%2F`。末尾的 `//` 是用来注释掉服务端自动补的那个括号，不然语法错误。
-
-服务端返回变成 `alert("CSP Bypass High")//({"answer":15});`，浏览器执行前面那段。
+服务端返回 `alert("CSP Bypass High")//({"answer":15});`，末尾 `//` 用来注释掉自动补的括号，不加会语法错误。
 
 ![JSONP callback 注入](high1.png)
 
-为什么 `script-src 'self'` 拦不住：脚本确实来自同源，那个 `jsonp.php` 就在本站。CSP 只判断"资源从哪来"，不判断"内容是什么"。同源接口自己吐出了攻击者控制的代码，CSP 没有理由拦。
+CSP 判断的是"资源从哪来"，不判断"内容是什么"。同源接口自己吐出了攻击者控制的代码，CSP 没有理由拦。
 
-## Impossible 为什么打不进去
+## Impossible
 
-1. CSP 严格，只有同源
-2. 没有 `'unsafe-inline'`，没有固定 nonce
-3. JSONP 的 callback 写死在代码里，用户改不了
-4. 用户输入不参与 HTML/JS 拼接
+- CSP 严格，只允许同源
+- 没有 `unsafe-inline`，没有固定 nonce
+- JSONP 的 callback 名写死在代码里，用户改不了
+- 用户输入不参与 HTML/JS 拼接
 
-第 3 条是关键。JSONP 这个机制本身有风险，但只要 callback 名固定、不接受参数，就注入不进去。更彻底的修法是别用 JSONP，改用 CORS + JSON，数据永远是数据，不会被当代码执行。
+第 3 条是关键。JSONP 这机制本身有风险，但 callback 固定就注入不进去。更彻底的修法是别用 JSONP，改 CORS + JSON。
 
-## 我卡住的地方
+## 容易记错的地方
 
-- 一开始以为 CSP 是服务端过滤，改了半天请求没用。后来才明白 CSP 是给浏览器的指令，服务端只是发个头，真正的拦截发生在浏览器里。
-- Medium 第一次只改了 payload 的 nonce 值，忘了 nonce 必须是页面上真实存在的那一串。对着 CSP 头抄下来才对。
-- High 改 callback 后一直报语法错误，原因是服务端会在 callback 后面直接拼 `({...})`，不注释掉就变成 `alert(...) ({...})`，语法不通。加 `//` 解决。
+- CSP 不是服务端过滤。改请求没用，拦截发生在浏览器里，服务端只负责发头。
+- Medium 的 nonce 必须抄页面上真实的那一串，自己编一个没用。
+- High 改完 callback 报语法错误，通常是漏了 `//`，服务端会往后拼 `({...})`。
+- 同源不等于安全，同源里也可能有可控输出点。
 
 ## 怎么修
 
-1. nonce 每次请求重新生成，用 `random_bytes` 这类真随机源，别用时间戳或者固定串。
-2. 不要同时使用 `nonce` 和 `'unsafe-inline'`。浏览器遇到 `'unsafe-inline'` 时会忽略 nonce，等于白配。
-3. 白名单只放自己能控制的域，别放任何允许用户上传内容的域名。
-4. 淘汰 JSONP。需要跨域就用 CORS，返回 `application/json`，并加 `X-Content-Type-Options: nosniff`。
-5. CSP 是兜底，不是主力。输出编码没做好，CSP 配得再严也只是提高门槛。
+| 措施 | 作用 |
+|---|---|
+| nonce 每请求随机 | 用 `random_bytes` 一类真随机源 |
+| 不同时用 nonce 与 `unsafe-inline` | 否则 nonce 被忽略 |
+| 白名单只放自己能控制的域 | 尤其别放允许上传的域名 |
+| 淘汰 JSONP | 改 CORS + `application/json` + `nosniff` |
+| 输出编码 | CSP 是兜底，不是主力 |
 
-## 参考来源
+## 参考
 
-Low 和 Impossible 两级的配置描述参考了 DVWA 官方文档和公开 writeup：
-
-- DVWA 官方文档 CSP Bypass 章节
-- digininja/DVWA 项目的 CSP 说明页
-- braincoke 的 DVWA CSP Bypass writeup
-
-High 的 JSONP 绕过和 Medium 的固定 nonce 是我在本机实际跑通的。
+- Low 与 Impossible 的配置描述参考 DVWA 官方文档与公开 writeup（digininja/DVWA CSP 说明页、braincoke 的 CSP Bypass 记录）。
+- Medium 的固定 nonce、High 的 JSONP 注入为本机实测。

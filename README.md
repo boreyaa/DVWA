@@ -1,8 +1,8 @@
 # DVWA 靶场复现笔记
 
-DVWA 是我拿来练手的第一套 Web 靶场。我用本机 phpStudy 起服务，Burp Suite 抓包，把 15 个模块从 Low 一路打到 Impossible，每个模块留下 payload、页面回显和当时的判断过程。
+DVWA 十五个模块，每个模块从 Low 打到 Impossible，记录 payload、页面回显、卡住的地方和正确的修法。
 
-这些东西不是看完教程抄的步骤，是我自己一条条打过去、卡住、再想明白的记录。所以里面会有"第一次以为是这样，其实不是"的内容。
+靶场跑在本机 `127.0.0.1`，没有对任何真实站点发起过请求。
 
 ## 环境
 
@@ -13,50 +13,56 @@ DVWA 是我拿来练手的第一套 Web 靶场。我用本机 phpStudy 起服务
 | 数据库 | MySQL |
 | 系统 | Windows 10 |
 | 抓包 | Burp Suite Pro 2025.9.4 |
-| 浏览器 | Chrome + 代理 127.0.0.1:8080 |
+| 代理 | Chrome → `127.0.0.1:8080` |
 
-页面地址固定在 `http://127.0.0.1/dvwa/`，安全等级在 `DVWA Security` 页切换。
+安全等级在 `DVWA Security` 页切换，页面地址 `http://127.0.0.1/dvwa/`。
 
-## 15 个模块
+## 模块
 
-| 模块 | 我练的东西 | 记录 |
+| 模块 | 练的内容 | 覆盖等级 |
 |---|---|---|
-| SQL Injection | 字符型和数字型的区别、ORDER BY 判列、UNION 取数、注释截断 | [SQL Injection](SQL%20Injection/SQL%20Injection.md) |
-| SQL Injection(Blind) | 布尔盲注、时间盲注、substr 逐字符、ASCII 判断 | [SQL Injection(Blind)](SQL%20Injection%28Blind%29/SQL%20Injection%28Blind%29.md) |
-| Brute Force | Intruder 爆破、Hydra 命令行、high 的 token 宏 | [Brute Force](Brute%20Force/Brute%20Force.md) |
-| File Upload | 直接传 shell、改 Content-Type、图片马、和文件包含组合 | [File Upload](File%20Upload/File%20Upload.md) |
-| File Inclusion | 路径穿越、php://filter 读源码、双写绕过、file:// 绕过白名单 | [File Inclusion](File%20Inclusion/File%20Inclusion.md) |
-| Command Injection | 命令连接符、黑名单绕过、无回显怎么判 | [Command Injection](Command%20Injection/Command%20Injection.md) |
-| CSRF | GET 改密、img 自动触发、Referer 绕过、Token + XSS 组合 | [CSRF](CSRF/CSRF.md) |
-| XSS(Reflected) | 反射型三档绕过、输出编码为什么是正解 | [XSS(Reflected)](XSS%28Reflected%29/XSS-%28Reflected%29.md) |
-| XSS(Stored) | 存储型、改 Cookie、改页面、Burp 绕 maxlength | [XSS(Stored)](XSS%28Stored%29/XSS-%28Stored%29.md) |
-| XSS(DOM) | source 和 sink、hash 不发给服务器、白名单为什么也拦不住 | [XSS(DOM)](XSS%28DOM%29/xss%28DOM%29.md) |
-| CSP Bypass | 宽白名单、固定 nonce、JSONP callback | [CSP Bypass](CSP%20Bypass/CSP%20Bypass.md) |
-| CAPTCHA | step 跳过、passed_captcha 伪造、high 的硬编码后门 | [CAPTCHA](CAPTCHA/CAPTCHA.md) |
-| Weak Sessions IDs | 自增、时间戳、md5(自增)、Burp Sequencer 看熵 | [Weak Sessions IDs](Weak%20Sessions%20IDs/Weak%20Sessions%20IDs.md) |
-| Cryptography | XOR+Base64、ECB 分组替换、CBC Padding Oracle | [Cryptography](Cryptography/Cryptography.md) |
-| JavaScript Attacks | 前端 token 生成逻辑逆推、ROT13/MD5/SHA256 | [javascript attacks](javascript%20attacks/javascript%20attacks.md) |
+| [SQL Injection](SQL%20Injection/SQL%20Injection.md) | 字符型与数字型、ORDER BY 判列、UNION 取数、注释截断 | Low–Impossible |
+| [SQL Injection(Blind)](SQL%20Injection%28Blind%29/SQL%20Injection%28Blind%29.md) | 布尔盲注、时间盲注、逐位枚举 | Low–Impossible |
+| [Brute Force](Brute%20Force/Brute%20Force.md) | Intruder 爆破、Hydra、High 的 token 宏 | Low–Impossible |
+| [File Upload](File%20Upload/File%20Upload.md) | 直接传 shell、改 Content-Type、图片马、与文件包含组合 | Low–High |
+| [File Inclusion](File%20Inclusion/File%20Inclusion.md) | 路径穿越、`php://filter` 读源码、双写绕过、`file://` 绕过前缀 | Low–Impossible |
+| [Command Injection](Command%20Injection/Command%20Injection.md) | 连接符、黑名单缺口、有无回显 | Low–Impossible |
+| [CSRF](CSRF/CSRF.md) | GET 改密、img 自动触发、Referer 绕过、token 被 XSS 带走 | Low–Impossible |
+| [XSS(Reflected)](XSS%28Reflected%29/XSS-%28Reflected%29.md) | 三档绕过、输出上下文对应编码 | Low–Impossible |
+| [XSS(Stored)](XSS%28Stored%29/XSS-%28Stored%29.md) | 持久触发、读 Cookie、改页面、Burp 绕 maxlength | Low–Impossible |
+| [XSS(DOM)](XSS%28DOM%29/xss%28DOM%29.md) | source 与 sink、hash 不发给服务器 | Low–Impossible |
+| [CSP Bypass](CSP%20Bypass/CSP%20Bypass.md) | 宽白名单、固定 nonce、JSONP callback | Medium–High 实测 |
+| [CAPTCHA](CAPTCHA/CAPTCHA.md) | `step` 跳过、`passed_captcha` 伪造、硬编码后门 | Low–Medium 实测 |
+| [Weak Sessions IDs](Weak%20Sessions%20IDs/Weak%20Sessions%20IDs.md) | 自增、时间戳、`md5(自增)`、Sequencer 看熵 | Low–Impossible |
+| [Cryptography](Cryptography/Cryptography.md) | XOR+Base64、ECB 分组替换、CBC Padding Oracle | 部分推演 |
+| [javascript attacks](javascript%20attacks/javascript%20attacks.md) | 前端 token 生成逻辑逆推 | Low–High |
 
-## 三种 XSS 的区别
+## 每个文件的结构
 
-一开始我三个模块是分开练的，练完才分清楚。
+统一五段，方便对照：
 
-- **反射型**：参数进来，同一次响应里就回显出去。不落库，要靠人点链接。
-- **存储型**：内容先进数据库，别人访问页面才触发。不用点链接，危害最大。
-- **DOM 型**：后端可能完全没参与，前端 JS 从 `location` 取参数、往 `innerHTML` 里塞。看流量看不到 payload，因为 `#` 后面的东西根本不发给服务器。
+| 段落 | 内容 |
+|---|---|
+| 漏洞在哪 | 一句话定义 + 有问题的代码 |
+| 等级对照 | 表：等级 / 防护 / 本机结果 |
+| 各等级做法 | 表：项 / 内容 + payload 代码块 + 截图 |
+| 容易记错的地方 | 4 到 5 条，具体到某一步 |
+| 怎么修 | 表：措施 / 作用 |
 
-## 每个文件怎么写的
+## 三种 XSS 的分界
 
-固定几块，方便以后回来查：
+| 类型 | 数据流向 | 落库 | 触发 |
+|---|---|---|---|
+| 反射型 | 参数 → 同次响应 | 否 | 诱导点链接 |
+| 存储型 | 提交 → 数据库 → 他人访问 | 是 | 打开页面即可 |
+| DOM 型 | URL → 前端 JS → DOM | 否 | 诱导点链接，payload 可能不到服务器 |
 
-1. 这个模块到底哪里出的问题（一句话 + 有漏洞的那行代码）
-2. Low / Medium / High 三档分别怎么打，用什么 payload，页面回显是什么
-3. Impossible 为什么打不进去
-4. 我卡住的地方
-5. 正确的修法
+## 关于"哪些真做过"
 
-## 说明
+CSP 的 Low、CAPTCHA 的 High、Cryptography 的大部分，我标了"未跑通"并给出参考来源。这几处是读文档与源码得出的，不是打出来的。其余为实测。
 
-- 所有操作都在本机 `127.0.0.1` 的靶场里做，没有对任何真实站点发起过请求。
-- 有几处我引用了公开资料（CSP 白名单、CAPTCHA 后门、Cryptography 的算法模式），文件里写明了"看了资料，没在本机跑通"，跟实测的部分分开标。面试被问到不会答错。
-- 图片在原目录下，文件名没改，可以直接对照。
+标出来不是为了好看，是为了面试被追问细节时对得上。
+
+## 免责
+
+所有内容仅用于本地靶场学习与防御研究。请勿用于未授权的真实目标。

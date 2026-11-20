@@ -1,74 +1,63 @@
 # XSS(Stored)
 
-留言板。填名字和内容，提交后存进数据库，每次打开页面都从库里读出来显示。
+留言板。填的内容进数据库，每次打开页面都读出来显示。payload 一旦入库，谁访问谁中招，不用点链接，也不用诱导。三种 XSS 里危害最大的一种。
 
-区别就在这个"存"字上。payload 进了库，谁访问谁中招，不用点链接，也不用诱导。所以存储型是三种 XSS 里危害最大的。
+## 漏洞在哪
+
+```php
+$message = $_POST['mtxMessage'];
+// 直接写库，读出时直接拼进 HTML
+echo "<div>{$message}</div>";
+```
+
+存的环节不过滤，输出的环节不编码。任意一处做了正确编码，危害都能降到最低。
 
 ## 数据流
 
-```
-提交内容 → 写入数据库 → 其他用户打开页面 → 从库里读出 → 拼进 HTML → 浏览器执行
+```text
+提交内容 → 写入数据库 → 用户打开页面 → 读出 → 拼进 HTML → 浏览器执行
 ```
 
-要注意存储点和触发点不一定在同一个页面。真实环境里更常见的形态是：用户在个人资料里填昵称，昵称存库，**管理员在后台的用户列表页看到它**，XSS 在管理员浏览器里炸。目标不是填内容的用户，是看他内容的人。
+存储点和触发点常常不在同一个页面。真实环境里常见形态是：用户在个人资料里填昵称，昵称存库，管理员在后台用户列表页看到它，XSS 在管理员浏览器里触发。目标不是填内容的人，是看他内容的人。
+
+## 等级对照
+
+| 等级 | 防护 | 本机结果 |
+|---|---|---|
+| Low | 无 | 弹窗、读 Cookie、改页面均成功 |
+| Medium | `str_replace` 删 `<script>`，name 字段有 maxlength | Burp 改请求体绕过 |
+| High | 大小写不敏感正则过滤 script | 事件属性仍执行 |
+| Impossible | 入库与输出双重编码 | 打不进去 |
 
 ## Low
 
-不过滤，直接存，直接输出。
-
-留言内容填：
-
-```html
-<script>alert('XSS')</script>
-```
-
-提交，页面刷新就弹窗。再刷新一次还弹，因为脚本在库里。
-
-![Low 弹窗](xss-low.png)
-
-### 读 Cookie
+| 项 | 内容 |
+|---|---|
+| Payload | `<script>alert('XSS')</script>` 放 message |
+| 结果 | 提交后弹窗，刷新仍弹 |
+| 原因 | 内容原样存库，原样输出 |
 
 ```html
 <script>alert(document.cookie)</script>
-```
-
-弹出来的就是当前会话的 `PHPSESSID` 和 `security`。真实环境里这一步是把 Cookie 发到攻击者服务器，然后拿这个 Cookie 顶替受害者登录。
-
-![读 Cookie](xss-cookie.png)
-
-### 改页面
-
-```html
 <script>document.body.innerHTML='页面已被修改'</script>
 ```
 
-![页面被篡改](xss-page-test.png)
+第一条弹出 `PHPSESSID` 与 `security`，真实环境是把 Cookie 发到攻击者服务器再顶替登录。第二条说明危害不止偷凭证，钓鱼表单、伪造公告都在这个能力范围内。
 
-这条说明危害不止偷 Cookie：钓鱼表单、伪造公告、诱导点击，都是在受害者看起来"正常"的页面上完成的。
+![弹窗](xss-low.png)
+
+![读 Cookie](xss-cookie.png)
+
+![页面被改](xss-page-test.png)
 
 ## Medium
 
-内容字段做了 `str_replace('<script>', '', $message)`，`<script>` 会被删掉。名字字段也一样处理。
-
-直接 `<script>alert('XSS')</script>` 不弹了。
-
-绕法还是那几个，但这里有个坑：**绕过的 payload 要放进 name 字段，不能放 message**。放 message 会被处理掉，而 name 字段的处理路径不一样。
-
-还有一个更实际的障碍：name 输入框有 `maxlength="10"`，`<img src=x onerror=alert(1)>` 有 28 个字符，页面上根本输不进去。
-
-### 绕 maxlength
-
-三种做法，我用的第一种：
-
-1. Burp 拦下提交请求，直接把 `txtName` 的值改成完整 payload。前端限制只在浏览器里生效，请求体里没有长度约束。
-2. `curl` 构造同样的 POST 请求直接发。
-3. 控制台里 `document.querySelector('[name=txtName]').removeAttribute('maxlength')`，然后正常输入。
-
-![Burp 改 name 字段](xss-burp.png)
-
-这里有个取舍：第三种最快，但它是在改靶场页面本身，等于绕过了练习对象。前两种才是真实场景里的做法，因为攻击者根本不用你的页面，他自己构造请求。
-
-改完之后的 payload：
+| 项 | 内容 |
+|---|---|
+| 防护 | `str_replace('<script>', '', $message)` |
+| 卡点 | name 字段 `maxlength="10"`，长 payload 输不进去 |
+| 绕过 | Burp 改请求体里的 `txtName` |
+| Payload 位置 | 必须放 name，放 message 会被处理掉 |
 
 ```html
 <img src=x onerror=alert('XSS')>
@@ -76,61 +65,61 @@
 <ScRiPt>alert('XSS')</ScRiPt>
 ```
 
-![Medium 绕过](xss-medium.png)
+三条绕 maxlength 的路子：
 
-`<ScRiPt>` 能过是因为 `str_replace` 是区分大小写的，`<script>` 不等于 `<ScRiPt>`。
+| 做法 | 命令 | 说明 |
+|---|---|---|
+| Burp 改请求 | 拦 POST，改 `txtName` 值 | 最贴近真实攻击 |
+| curl 构造 | 自己拼同样的 POST | 效果相同 |
+| 控制台删属性 | `removeAttribute('maxlength')` | 最快，但等于改靶场本身 |
+
+前两种才是真实场景的做法，因为攻击者根本不打开你的页面，他自己构造请求。
+
+![Burp 改 name 字段](xss-burp.png)
+
+![Medium 绕过](xss-medium.png)
 
 ## High
 
-换成大小写不敏感的正则：
+| 项 | 内容 |
+|---|---|
+| 防护 | `preg_replace('/<(.*)s(.*)c(.*)r(.*)i(.*)p(.*)t/i', '', $message)` |
+| 失效 | `script` 的三种写法全废 |
+| 仍可用 | `<img src=x onerror=alert('XSS')>`、`<svg onload=alert('XSS')>` |
+
+和反射型同一个原因：过滤的是标签名，而执行 JS 不靠标签名。
+
+## Impossible
 
 ```php
-preg_replace('/<(.*)s(.*)c(.*)r(.*)i(.*)p(.*)t/i', '', $message);
+$message = htmlspecialchars($message, ENT_QUOTES, 'UTF-8');  // 入库前
+echo htmlspecialchars($row['message'], ENT_QUOTES, 'UTF-8'); // 输出时
 ```
 
-`script` 的三种写法全废。但事件属性这条路一直开着：
+另加 CSRF token 与预处理语句。存进去的已是实体 `&lt;script&gt;`，读出来也只是文字。
 
-```html
-<img src=x onerror=alert('XSS')>
-<svg onload=alert('XSS')>
-```
+## 输入过滤与输出编码的区别
 
-和反射型那节完全一样的原因：过滤的是"标签名"，而执行 JS 不靠标签名。
-
-## Impossible 为什么打不进去
-
-两层：
-
-1. 存的时候用 `htmlspecialchars($message, ENT_QUOTES, 'UTF-8')` 编码
-2. 输出的时候再编码一次
-
-存进去的已经是实体，`&lt;script&gt;`，读出来显示也是实体，浏览器当文字看。
-
-另外还加了 token 防 CSRF、数据库用预处理语句。这几条和 XSS 没直接关系，但一起构成了这个模块的整体防护。
-
-## 输入过滤和输出编码不是一回事
-
-这个区分很多人搞不清，写在这儿：
-
-| 做法 | 代码 | 效果 |
+| 做法 | 代码 | 特点 |
 |---|---|---|
-| 输入过滤 | `str_replace('<script>', '', $m)` | 改的是存进库的内容，黑名单可绕 |
-| 输出编码 | `htmlspecialchars($m, ENT_QUOTES, 'UTF-8')` | 改的是显示形式，标签变文字，绕不了 |
+| 输入过滤 | `str_replace('<script>', '', $m)` | 改的是入库内容，黑名单可绕，漏一次脏数据永久留在库里 |
+| 输出编码 | `htmlspecialchars($m, ENT_QUOTES, 'UTF-8')` | 改的是显示形式，绕不了，漏一个输出点才漏一个点 |
 
-关键差别：输入过滤要在**入库前**做，一旦漏了，脏数据永远在库里；输出编码在**显示前**做，每个输出点各自处理，漏一个点才漏一个点。
+正确做法是输出编码。输入侧只做长度与类型校验，别指望它防 XSS。
 
-正确做法是输出编码，输入侧只做长度和类型校验，别指望它防 XSS。
+## 容易记错的地方
 
-## 我卡住的地方
-
-- Medium 一开始把 payload 放 message，怎么都不弹。后来发现 name 字段才是没被处理干净的那个。
-- `maxlength` 卡了很久。试过在输入框里粘贴，粘贴也被截断。最后用 Burp 改请求体，一次就过。这件事让我记住了：**所有前端限制都只是体验，不是安全边界**。
-- `<ScRiPt>` 大小写绕过的原理是 `str_replace` 区分大小写，不是浏览器不区分。浏览器对标签名是不区分大小写的，所以它会正常解析。
+- payload 放 message 一直不弹，放 name 才通，两个字段的处理路径不同。
+- 粘贴也会被 maxlength 截断，前端限制只在浏览器里生效，请求体没有约束。
+- `<ScRiPt>` 能过是因为 `str_replace` 区分大小写，浏览器解析标签不区分大小写。
+- 刷新还弹不是没生效，是数据库里存着，这正说明是存储型。
 
 ## 怎么修
 
-1. 输出编码，`htmlspecialchars($s, ENT_QUOTES, 'UTF-8')`，每个输出点都要做。
-2. 富文本用白名单库，不要自己写正则。
-3. Cookie 加 `HttpOnly`，脚本读不到 session。
-4. CSP 限制脚本来源。
-5. 后台管理页面尤其注意。存储型的触发点经常在后台，管理员一登录就中招，等于直接拿下最高权限。
+| 措施 | 作用 |
+|---|---|
+| 输出编码 | 每个输出点都做，`ENT_QUOTES` + `UTF-8` |
+| 富文本用白名单库 | 别写正则 |
+| Cookie 加 `HttpOnly` | 脚本读不到会话 |
+| CSP 限制脚本源 | 兜底 |
+| 后台页面重点防 | 触发点常在后台，管理员一登录就中招 |

